@@ -1258,6 +1258,7 @@
         // AUTO-REFRESH CONFIGURATION
         // ==========================================
         let walletRefreshInterval = null;
+        let isLoadingWallets = false;
 
         // ==========================================
         // UTILITY FUNCTIONS
@@ -1474,8 +1475,13 @@
         // ==========================================
         
         async function loadVerifiedWallets() {
+            // Prevent overlapping requests
+            if (isLoadingWallets) return;
+            
             const container = document.getElementById('wallet-list-container');
             if (!container) return;
+            
+            isLoadingWallets = true;
             
             try {
                 const response = await fetch(`${API_BASE_URL}/wallets?status=verified&limit=20`);
@@ -1519,6 +1525,8 @@
                         </button>
                     </div>
                 `;
+            } finally {
+                isLoadingWallets = false;
             }
         }
 
