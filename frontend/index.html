@@ -1541,6 +1541,22 @@
             }, 5000);
         }
 
+        function stopWalletAutoRefresh() {
+            if (walletRefreshInterval) {
+                clearInterval(walletRefreshInterval);
+                walletRefreshInterval = null;
+            }
+        }
+
+        // Pause refresh when page is hidden, resume when visible
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                stopWalletAutoRefresh();
+            } else {
+                startWalletAutoRefresh();
+            }
+        });
+
         function createWalletCard(wallet) {
             const riskClass = wallet.riskScore >= 90 ? 'risk-high' : wallet.riskScore >= 70 ? 'risk-medium' : 'risk-low';
             const statusBadge = wallet.riskScore >= 90 
