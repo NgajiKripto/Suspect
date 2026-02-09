@@ -1255,6 +1255,13 @@
             : 'https://suspected.dev/api';  // Change when deploying
 
         // ==========================================
+        // AUTO-REFRESH CONFIGURATION
+        // ==========================================
+        let walletRefreshInterval = null;
+        let isLoadingWallets = false;
+        const WALLET_REFRESH_INTERVAL_MS = 5000; // Refresh every 5 seconds
+
+        // ==========================================
         // UTILITY FUNCTIONS
         // ==========================================
         
@@ -1469,8 +1476,13 @@
         // ==========================================
         
         async function loadVerifiedWallets() {
+            // Prevent overlapping requests
+            if (isLoadingWallets) return;
+            
             const container = document.getElementById('wallet-list-container');
             if (!container) return;
+            
+            isLoadingWallets = true;
             
             try {
                 const response = await fetch(`${API_BASE_URL}/wallets?status=verified&limit=20`);
@@ -1514,6 +1526,34 @@
                         </button>
                     </div>
                 `;
+            } finally {
+                isLoadingWallets = false;
+            }
+        }
+
+        // ==========================================
+        // AUTO-REFRESH FUNCTION
+        // ==========================================
+        
+        function startWalletAutoRefresh() {
+            // Clear any existing interval to prevent duplicates
+            if (walletRefreshInterval) {
+                clearInterval(walletRefreshInterval);
+            }
+            
+            // Load wallets immediately on first call
+            loadVerifiedWallets();
+            
+            // Set up auto-refresh every 5 seconds
+            walletRefreshInterval = setInterval(() => {
+                loadVerifiedWallets();
+            }, WALLET_REFRESH_INTERVAL_MS);
+        }
+
+        function stopWalletAutoRefresh() {
+            if (walletRefreshInterval) {
+                clearInterval(walletRefreshInterval);
+                walletRefreshInterval = null;
             }
         }
 
@@ -1846,8 +1886,17 @@
             initThemeToggle('themeToggle');
             initThemeToggle('themeToggleMobile');
             
-            // Load data
-            loadVerifiedWallets();
+            // Load data with auto-refresh
+            startWalletAutoRefresh();
+            
+            // Pause refresh when page is hidden, resume when visible
+            document.addEventListener('visibilitychange', function() {
+                if (document.hidden) {
+                    stopWalletAutoRefresh();
+                } else {
+                    startWalletAutoRefresh();
+                }
+            });
             
             // Form
             initReportForm();
