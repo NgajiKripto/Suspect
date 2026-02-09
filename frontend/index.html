@@ -1556,15 +1556,6 @@
             }
         }
 
-        // Pause refresh when page is hidden, resume when visible
-        document.addEventListener('visibilitychange', function() {
-            if (document.hidden) {
-                stopWalletAutoRefresh();
-            } else {
-                startWalletAutoRefresh();
-            }
-        });
-
         function createWalletCard(wallet) {
             const riskClass = wallet.riskScore >= 90 ? 'risk-high' : wallet.riskScore >= 70 ? 'risk-medium' : 'risk-low';
             const statusBadge = wallet.riskScore >= 90 
@@ -1896,6 +1887,15 @@
             
             // Load data with auto-refresh
             startWalletAutoRefresh();
+            
+            // Pause refresh when page is hidden, resume when visible
+            document.addEventListener('visibilitychange', function() {
+                if (document.hidden) {
+                    stopWalletAutoRefresh();
+                } else {
+                    startWalletAutoRefresh();
+                }
+            });
             
             // Form
             initReportForm();
