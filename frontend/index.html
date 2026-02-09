@@ -1259,6 +1259,7 @@
         // ==========================================
         let walletRefreshInterval = null;
         let isLoadingWallets = false;
+        const WALLET_REFRESH_INTERVAL_MS = 5000; // Refresh every 5 seconds
 
         // ==========================================
         // UTILITY FUNCTIONS
@@ -1546,7 +1547,7 @@
             // Set up auto-refresh every 5 seconds
             walletRefreshInterval = setInterval(() => {
                 loadVerifiedWallets();
-            }, 5000);
+            }, WALLET_REFRESH_INTERVAL_MS);
         }
 
         function stopWalletAutoRefresh() {
