@@ -1255,6 +1255,11 @@
             : 'https://suspected.dev/api';  // Change when deploying
 
         // ==========================================
+        // AUTO-REFRESH CONFIGURATION
+        // ==========================================
+        let walletRefreshInterval = null;
+
+        // ==========================================
         // UTILITY FUNCTIONS
         // ==========================================
         
@@ -1515,6 +1520,25 @@
                     </div>
                 `;
             }
+        }
+
+        // ==========================================
+        // AUTO-REFRESH FUNCTION
+        // ==========================================
+        
+        function startWalletAutoRefresh() {
+            // Clear any existing interval to prevent duplicates
+            if (walletRefreshInterval) {
+                clearInterval(walletRefreshInterval);
+            }
+            
+            // Load wallets immediately on first call
+            loadVerifiedWallets();
+            
+            // Set up auto-refresh every 5 seconds
+            walletRefreshInterval = setInterval(() => {
+                loadVerifiedWallets();
+            }, 5000);
         }
 
         function createWalletCard(wallet) {
@@ -1846,8 +1870,8 @@
             initThemeToggle('themeToggle');
             initThemeToggle('themeToggleMobile');
             
-            // Load data
-            loadVerifiedWallets();
+            // Load data with auto-refresh
+            startWalletAutoRefresh();
             
             // Form
             initReportForm();
