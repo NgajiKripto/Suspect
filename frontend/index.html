@@ -1561,7 +1561,6 @@
                                     <th>Token Address</th>
                                     <th>Tx Hash</th>
                                     <th>Description</th>
-                                    <th>Remove Liquidity (SOL)</th>
                                     <th>Status</th>
                                     <th>Risk Score</th>
                                 </tr>
@@ -1621,8 +1620,6 @@
             const txLink = txHash
                 ? `<a href="https://solscan.io/tx/${txHash}" target="_blank" rel="noopener noreferrer" class="wallet-table-link">${txHash.substring(0, 8)}...${txHash.substring(txHash.length - 8)}</a>`
                 : '—';
-            const amountSol = wallet.verification?.['amount remove liquidity(SOL) '] ?? null;
-            const amountDisplay = amountSol !== null ? `${amountSol} SOL` : '—';
             const statusClass = wallet.status === 'verified' ? 'status-confirmed' : 'status-suspicious';
 
             return `
@@ -1632,7 +1629,6 @@
                     <td>${wallet.tokenAddress ?? '—'}</td>
                     <td>${txLink}</td>
                     <td>${wallet.evidence?.description ?? '—'}</td>
-                    <td>${amountDisplay}</td>
                     <td><span class="status-badge ${statusClass}">${wallet.status ?? '—'}</span></td>
                     <td>${wallet.riskScore ?? '—'}</td>
                 </tr>
