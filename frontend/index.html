@@ -971,6 +971,47 @@
             font-size: 2rem;
             margin-bottom: 15px;
         }
+
+        /* Wallet Data Table */
+        .wallet-table-wrapper {
+            overflow-x: auto;
+        }
+        .wallet-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: var(--font-mono);
+            font-size: 12px;
+        }
+        .wallet-table thead tr {
+            background: var(--bg-secondary);
+            border-bottom: 2px solid var(--hazard-orange);
+        }
+        .wallet-table th {
+            padding: 10px 12px;
+            text-align: left;
+            color: var(--hazard-orange);
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            white-space: nowrap;
+        }
+        .wallet-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border-secondary);
+            color: var(--text-main);
+            vertical-align: middle;
+            word-break: break-all;
+        }
+        .wallet-table tbody tr:hover {
+            background: var(--bg-secondary);
+        }
+        .wallet-table-link {
+            color: var(--hazard-orange);
+            text-decoration: none;
+        }
+        .wallet-table-link:hover {
+            text-decoration: underline;
+        }
     </style>
 </head>
 <body>
@@ -1510,12 +1551,27 @@
                     return;
                 }
                 
-                container.innerHTML = result.data.map(wallet => createWalletCard(wallet)).join('');
-                
-                // Re-initialize animations
-                setTimeout(() => {
-                    animateSegmentedBars();
-                }, 100);
+                container.innerHTML = `
+                    <div class="wallet-table-wrapper">
+                        <table class="wallet-table">
+                            <thead>
+                                <tr>
+                                    <th>Case #</th>
+                                    <th>Wallet Address</th>
+                                    <th>Token Address</th>
+                                    <th>Tx Hash</th>
+                                    <th>Description</th>
+                                    <th>Remove Liquidity (SOL)</th>
+                                    <th>Status</th>
+                                    <th>Risk Score</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${result.data.map(wallet => createWalletRow(wallet)).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                `;
                 
             } catch (error) {
                 console.error('Failed to load wallets:', error);
@@ -1560,92 +1616,26 @@
             }
         }
 
-        function createWalletCard(wallet) {
-            const riskClass = wallet.riskScore >= 90 ? 'risk-high' : wallet.riskScore >= 70 ? 'risk-medium' : 'risk-low';
-            const statusBadge = wallet.riskScore >= 90 
-                ? '<span class="status-badge status-confirmed"><i class="fa-solid fa-circle-exclamation"></i> Confirmed</span>'
-                : '<span class="status-badge status-suspicious"><i class="fa-solid fa-triangle-exclamation"></i> Suspicious</span>';
-            
-            const barClass = wallet.riskScore >= 70 ? 'bar-danger' : wallet.riskScore >= 40 ? 'bar-warning' : 'bar-safe';
-            const filledSegments = Math.ceil(wallet.riskScore / 10);
-            
-            const shortAddress = `${wallet.walletAddress.substring(0, 8)}...${wallet.walletAddress.substring(wallet.walletAddress.length - 8)}`;
-            
-            const victimsLoss = wallet.verification?.victimsLoss 
-                ? `$${wallet.verification.victimsLoss.toLocaleString()} USD`
-                : 'Under Investigation';
-            
-            const solscanLink = `https://solscan.io/account/${wallet.walletAddress}`;
-            
-            let segmentsHtml = '';
-            for (let i = 0; i < 10; i++) {
-                const isFilled = i < filledSegments;
-                const isHighRisk = wallet.riskScore > 90 && isFilled;
-                segmentsHtml += `<div class="segment ${isFilled ? 'filled' : ''} ${isHighRisk ? 'high-risk' : ''}"></div>`;
-            }
-            
-            const patterns = wallet.verification?.patternFound || [];
-            const patternHtml = patterns.length 
-                ? `<div style="font-size: 10px; color: var(--gray-666); margin-top: 4px;">${patterns.join(' • ')}</div>`
-                : '';
-            
-            const liquidityWarning = wallet.verification?.liquidityLocked === false 
-                ? `<div style="margin-top: 10px; font-size: 11px; color: var(--alert-red); font-family: var(--font-mono);">
-                     <i class="fa-solid fa-lock-open"></i> LIQUIDITY NOT LOCKED
-                   </div>` 
-                : '';
+        function createWalletRow(wallet) {
+            const txHash = wallet.evidence?.txHash ?? '';
+            const txLink = txHash
+                ? `<a href="https://solscan.io/tx/${txHash}" target="_blank" rel="noopener noreferrer" class="wallet-table-link">${txHash.substring(0, 8)}...${txHash.substring(txHash.length - 8)}</a>`
+                : '—';
+            const amountSol = wallet.verification?.['amount remove liquidity(SOL) '] ?? null;
+            const amountDisplay = amountSol !== null ? `${amountSol} SOL` : '—';
+            const statusClass = wallet.status === 'verified' ? 'status-confirmed' : 'status-suspicious';
 
             return `
-                <div class="scammer-wallet-card ${riskClass}">
-                    <div class="wallet-card-container">
-                        <div class="serial-number-wrapper">
-                            <span class="case-file-label">CASE FILE NO.</span>
-                            <div class="serial-number-box">
-                                <span class="serial-number">${String(wallet.caseNumber).padStart(2, '0')}</span>
-                            </div>
-                        </div>
-
-                        <div class="wallet-card-content">
-                            <div class="wallet-header">
-                                <div class="wallet-address-section">
-                                    <p class="wallet-label">WALLET ADDRESS</p>
-                                    <p class="wallet-address" title="${wallet.walletAddress}">${shortAddress}</p>
-                                </div>
-                                <div>${statusBadge}</div>
-                            </div>
-
-                            <div class="risk-score-section">
-                                <div class="segmented-bar-container ${barClass}">
-                                    <div class="segmented-bar">
-                                        ${segmentsHtml}
-                                    </div>
-                                    <div class="segmented-bar-score">
-                                        <span class="segmented-bar-value">${wallet.riskScore}</span>
-                                        <span class="segmented-bar-label">/100</span>
-                                    </div>
-                                </div>
-                                <div class="risk-score-info">
-                                    <span class="risk-score-label">RISK SCORE</span>
-                                    ${patternHtml}
-                                </div>
-                            </div>
-
-                            <div class="victims-info">
-                                <i class="fa-solid fa-dollar-sign victims-icon"></i>
-                                <span class="victims-label">VICTIMS LOSS:</span>
-                                <span class="victims-amount">${victimsLoss}</span>
-                            </div>
-                            
-                            ${liquidityWarning}
-                            
-                            <div style="margin-top: 12px;">
-                                <a href="${solscanLink}" target="_blank" class="btn btn-outline" style="padding: 6px 12px; font-size: 11px;">
-                                    <i class="fa-solid fa-external-link-alt"></i> View on Solscan
-                                </a>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                <tr>
+                    <td>${wallet.caseNumber ?? '—'}</td>
+                    <td>${wallet.walletAddress ?? '—'}</td>
+                    <td>${wallet.tokenAddress ?? '—'}</td>
+                    <td>${txLink}</td>
+                    <td>${wallet.evidence?.description ?? '—'}</td>
+                    <td>${amountDisplay}</td>
+                    <td><span class="status-badge ${statusClass}">${wallet.status ?? '—'}</span></td>
+                    <td>${wallet.riskScore ?? '—'}</td>
+                </tr>
             `;
         }
 
