@@ -120,10 +120,12 @@ app.get('/api/wallets', async (req, res) => {
   try {
     const { status = 'verified', limit = 50 } = req.query;
 
-    const wallets = await Wallet.find({
-      status,
-      isActive: true
-    })
+    const query = { isActive: true };
+    if (status !== 'all') {
+      query.status = status;
+    }
+
+    const wallets = await Wallet.find(query)
       .sort({ riskScore: -1, caseNumber: -1 })
       .limit(parseInt(limit))
       .select('-__v');

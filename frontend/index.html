@@ -841,6 +841,21 @@
             color: #fdba74;
             border: 1px solid #c2410c;
         }
+        .status-pending {
+            background: rgba(50, 50, 0, 0.5);
+            color: #fde68a;
+            border: 1px solid #ca8a04;
+        }
+        .status-investigating {
+            background: rgba(17, 24, 80, 0.5);
+            color: #93c5fd;
+            border: 1px solid #2563eb;
+        }
+        .status-rejected {
+            background: rgba(30, 30, 30, 0.5);
+            color: #9ca3af;
+            border: 1px solid #4b5563;
+        }
         .segmented-bar-container {
             flex-shrink: 0;
             width: 120px;
@@ -1148,7 +1163,7 @@
             <div class="section-header">
                 <h2 class="section-title">Latest Scammer Wallets</h2>
                 <p>
-                    Manually verified wallets showing suspicious rugpull patterns. Updated as investigations complete.
+                    All reported wallets and their current investigation status. Verified cases are confirmed suspicious; pending and investigating cases are under review.
                 </p>
             </div>
 
@@ -1156,7 +1171,7 @@
             <div class="max-w-5xl mt-12" id="wallet-list-container">
                 <div class="loading-container">
                     <i class="fa-solid fa-circle-notch fa-spin"></i>
-                    <h3>Loading Verified Database</h3>
+                    <h3>Loading Database</h3>
                     <p>Connecting to secure server...</p>
                 </div>
             </div>
@@ -1539,7 +1554,7 @@
             isLoadingWallets = true;
             
             try {
-                const response = await fetch(`${API_BASE_URL}/wallets?status=verified&limit=20`);
+                const response = await fetch(`${API_BASE_URL}/wallets?status=all&limit=50`);
                 
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}`);
@@ -1552,7 +1567,7 @@
                         <div class="loading-container">
                             <i class="fa-solid fa-database" style="font-size: 3rem; opacity: 0.5;"></i>
                             <h3>Database Being Populated</h3>
-                            <p>First verified cases will appear here soon.<br>Help us by submitting suspicious wallet reports.</p>
+                            <p>No reports found yet.<br>Help us by submitting suspicious wallet reports.</p>
                             <a href="#submit-report" class="btn btn-primary" style="margin-top: 20px;">
                                 <i class="fa-solid fa-flag"></i> Submit Report
                             </a>
@@ -1630,7 +1645,13 @@
             const txLink = txHash
                 ? `<a href="https://solscan.io/tx/${txHash}" target="_blank" rel="noopener noreferrer" class="wallet-table-link">${txHash.substring(0, 8)}...${txHash.substring(txHash.length - 8)}</a>`
                 : '—';
-            const statusClass = wallet.status === 'verified' ? 'status-confirmed' : 'status-suspicious';
+            const statusClassMap = {
+                verified: 'status-confirmed',
+                rejected: 'status-rejected',
+                investigating: 'status-investigating',
+                pending: 'status-pending'
+            };
+            const statusClass = statusClassMap[wallet.status] ?? 'status-pending';
 
             return `
                 <tr>
