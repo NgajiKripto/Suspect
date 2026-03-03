@@ -1,243 +1,169 @@
-/**
- * =========================================
- * ENV & DEPENDENCIES
- * =========================================
- */
 require('dotenv').config();
 
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const TelegramBot = require('node-telegram-bot-api');
 
-const Wallet = require('./models/Wallet');
+const Wallet = require('./models/wallet');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.set('trust proxy', 1);
-/**
- * =========================================
- * TELEGRAM BOT (FINAL - POLLING)
- * =========================================
- */
-const botToken = process.env.TELEGRAM_BOT_TOKEN;
-const chatId = process.env.TELEGRAM_CHAT_ID; // WAJIB isi dengan chat id Anda
-
-let bot = null;
-
-if (!botToken) {
-  console.error('❌ TELEGRAM_BOT_TOKEN tidak ada');
-} else {
-  bot = new TelegramBot(botToken, { polling: true });
-  console.log('✅ Telegram Bot Connected (polling)');
-}
-
-// Helper kirim pesan
-const sendTelegram = async (message, options = {}) => {
-  if (!bot || !chatId) return;
-  try {
-    await bot.sendMessage(chatId, message, {
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-      ...options
-    });
-  } catch (err) {
-    console.error('❌ Telegram Error:', err.message);
-  }
-};
-
-// Handle tombol Verify / Reject
-bot?.on('callback_query', async (query) => {
-  const [action, walletId] = query.data.split('_');
-  const admin = query.from.username || 'unknown';
-
-  if (!['verify', 'reject'].includes(action)) return;
-
-  try {
-    await Wallet.findByIdAndUpdate(walletId, {
-      status: action === 'verify' ? 'verified' : 'rejected',
-      'verification.verifiedBy': admin,
-      'verification.verifiedAt': new Date()
-    });
-
-    await bot.answerCallbackQuery(query.id, {
-      text: action === 'verify' ? '✅ Diverifikasi' : '❌ Ditolak'
-    });
-
-    await bot.sendMessage(
-      query.message.chat.id,
-      `${action === 'verify' ? '✅' : '❌'} Case ${walletId} ${action} oleh @${admin}`
-    );
-  } catch (err) {
-    console.error('Telegram callback error:', err.message);
-  }
-});
-
-/**
- * =========================================
- * MIDDLEWARE
- * =========================================
- */
+app.use(helmet());
 app.use(cors());
 app.use(express.json());
 
-app.use(
-  '/api/',
-  rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100
-  })
-);
+app.use('/api/', rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100
+}));
 
 /**
- * =========================================
+ * ==========================
  * DATABASE
- * =========================================
+ * ==========================
  */
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(() => console.log('✅ MongoDB Connected'))
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('MongoDB Connected'))
   .catch(err => {
-    console.error('❌ MongoDB Error:', err);
+    console.error(err);
     process.exit(1);
   });
 
 /**
- * =========================================
- * ROUTES
- * =========================================
+ * ==========================
+ * TELEGRAM BOT
+ * ==========================
  */
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+const chatId = process.env.TELEGRAM_CHAT_ID;
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', time: new Date() });
-});
+// STEP 1: Admin isi forensic data
+const requestForensicInput = async (wallet) => {
+  await bot.sendMessage(chatId,
+    `📋 Case #${wallet.caseNumber}
 
-// GET wallets
-app.get('/api/wallets', async (req, res) => {
-  try {
-    const { status = 'verified', limit = 50 } = req.query;
+Isi forensic data dengan format:
 
-    const wallets = await Wallet.find({
-      status,
-      isActive: true
-    })
-      .sort({ riskScore: -1, caseNumber: -1 })
-      .limit(parseInt(limit))
-      .select('-__v');
+LiquidityBefore:
+LiquidityAfter:
+DrainDurationHours:
+DetectedPattern:
+WalletFunding:
+`
+  );
+};
 
-    res.json({ success: true, count: wallets.length, data: wallets });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+// STEP 2: Admin submit forensic via bot
+bot.on('message', async (msg) => {
+  if (!msg.text.includes('LiquidityBefore')) return;
 
-// GET wallet by address
-app.get('/api/wallets/:address', async (req, res) => {
-  try {
-    const wallet = await Wallet.findOne({
-      walletAddress: req.params.address,
-      isActive: true
-    });
+  const lines = msg.text.split('\n');
+  const data = {};
 
-    if (!wallet) {
-      return res.status(404).json({ success: false, message: 'Wallet not found' });
-    }
+  lines.forEach(line => {
+    const [key, value] = line.split(':');
+    if (key && value) data[key.trim()] = value.trim();
+  });
 
-    res.json({ success: true, data: wallet });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+  const wallet = await Wallet.findOne({ status: 'pending' })
+    .sort({ createdAt: -1 });
 
-// POST wallet report
-app.post('/api/wallets', async (req, res) => {
-  try {
-    const { walletAddress, evidence = {}, projectName, tokenAddress } = req.body;
+  if (!wallet) return;
 
-    const base58Regex = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-    if (!base58Regex.test(walletAddress)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid Solana wallet address'
-      });
-    }
+  wallet.forensic = {
+    liquidityBefore: Number(data.LiquidityBefore),
+    liquidityAfter: Number(data.LiquidityAfter),
+    drainDurationHours: Number(data.DrainDurationHours),
+    detectedPattern: data.DetectedPattern?.split(',') || [],
+    walletFunding: data.WalletFunding
+  };
 
-    let wallet = await Wallet.findOne({ walletAddress });
+  await wallet.save();
 
-    if (wallet) {
-      wallet.reportCount += 1;
-      wallet.lastUpdated = new Date();
-      await wallet.save();
-
-      return res.json({
-        success: true,
-        message: 'Report added to existing case',
-        data: wallet
-      });
-    }
-
-    wallet = new Wallet({
-      walletAddress,
-      projectName,
-      tokenAddress,
-      evidence: {
-        txHash: evidence.txHash,
-        solscanLink: evidence.solscanLink,
-        description: evidence.description
-      },
-      status: 'pending'
-    });
-
-    await wallet.save();
-
-    // 🔔 Telegram notification
-    await sendTelegram(
-      `
-🚨 <b>LAPORAN BARU MASUK</b>
-
-📋 Case #${wallet.caseNumber}
-👛 <code>${wallet.walletAddress}</code>
-📊 Status: ${wallet.status.toUpperCase()}
-🎯 Risk: ${wallet.riskScore}/100
-🕒 ${new Date().toLocaleString()}
-
-📝 ${wallet.evidence.description || '-'}
-`,
-      {
-        reply_markup: {
-          inline_keyboard: [[
-            { text: '✅ Verifikasi', callback_data: `verify_${wallet._id}` },
-            { text: '❌ Tolak', callback_data: `reject_${wallet._id}` }
-          ]]
-        }
+  await bot.sendMessage(chatId,
+    `Forensic saved. Klik verify.`,
+    {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Verify', callback_data: `verify_${wallet._id}` }
+        ]]
       }
-    );
+    }
+  );
+});
 
-    res.status(201).json({
-      success: true,
-      message: 'Report submitted',
-      data: wallet
+// STEP 3: Verify only after forensic filled
+bot.on('callback_query', async (query) => {
+  const [action, id] = query.data.split('_');
+
+  if (action !== 'verify') return;
+
+  const wallet = await Wallet.findById(id);
+
+  if (!wallet.forensic?.liquidityBefore) {
+    return bot.answerCallbackQuery(query.id, {
+      text: 'Isi forensic dulu!'
     });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
   }
+
+  wallet.status = 'verified';
+  await wallet.save();
+
+  await bot.sendMessage(chatId,
+    `✅ Case #${wallet.caseNumber} Verified\nRisk Score: ${wallet.riskScore}`
+  );
 });
 
 /**
- * =========================================
- * START SERVER (PM2 SAFE)
- * =========================================
+ * ==========================
+ * ROUTES
+ * ==========================
  */
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+
+// PUBLIC LIST
+app.get('/api/wallets', async (req, res) => {
+  const wallets = await Wallet.find({ status: 'verified' })
+    .select('-forensic -__v');
+  res.json(wallets);
 });
 
-server.on('error', err => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`❌ Port ${PORT} already in use`);
-    process.exit(1);
+// PUBLIC DETAIL
+app.get('/api/wallets/:address', async (req, res) => {
+  const wallet = await Wallet.findOne({
+    walletAddress: req.params.address,
+    status: 'verified'
+  }).select('-forensic');
+
+  if (!wallet) return res.status(404).json({ message: 'Not found' });
+
+  res.json(wallet);
+});
+
+/**
+ * PREMIUM ENDPOINT (x402 REQUIRED)
+ */
+app.get('/api/wallets/:address/premium', async (req, res) => {
+
+  const paid = req.headers['x402-payment'];
+
+  if (!paid || paid !== 'valid') {
+    return res.status(402).json({
+      message: 'Payment required via x402'
+    });
   }
+
+  const wallet = await Wallet.findOne({
+    walletAddress: req.params.address,
+    status: 'verified'
+  });
+
+  res.json(wallet.forensic);
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on ${PORT}`);
 });
