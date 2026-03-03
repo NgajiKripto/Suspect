@@ -1,5 +1,21 @@
 const mongoose = require('mongoose');
 
+/**
+ * ==========================
+ * COUNTER (Atomic Case Number)
+ * ==========================
+ */
+const counterSchema = new mongoose.Schema({
+  name: { type: String, unique: true },
+  seq: { type: Number, default: 0 }
+});
+const Counter = mongoose.model('Counter', counterSchema);
+
+/**
+ * ==========================
+ * WALLET SCHEMA
+ * ==========================
+ */
 const walletSchema = new mongoose.Schema({
   walletAddress: {
     type: String,
@@ -7,67 +23,83 @@ const walletSchema = new mongoose.Schema({
     unique: true,
     index: true
   },
-  caseNumber: {
-    type: Number,
-    required: false,
-    unique: true
-  },
+  caseNumber: { type: Number, unique: true },
+
   status: {
     type: String,
     enum: ['pending', 'investigating', 'verified', 'rejected'],
-    default: 'pending'
+    default: 'pending',
+    index: true
   },
-  riskScore: {
-    type: Number,
-    min: 0,
-    max: 100,
-    default: 0
-  },
+
+  riskScore: { type: Number, default: 0, max: 100, index: true },
+
   projectName: String,
   tokenAddress: String,
+
   evidence: {
     txHash: String,
     solscanLink: String,
     description: String,
     submittedAt: { type: Date, default: Date.now }
   },
-  verification: {
-    verifiedBy: String,
-    verifiedAt: Date,
-    notes: String,
-    solscanChecked: { type: Boolean, default: false },
-    liquidityLocked: { type: Boolean, default: false },
-    liquidityAmount: Number,
-    victimsLoss: { type: Number, default: 0 },
-    patternFound: [String]
+
+  // 🔴 PREMIUM FORENSIC DATA
+  forensic: {
+    liquidityBefore: Number,
+    liquidityAfter: Number,
+    drainDurationHours: Number,
+    detectedPattern: { type: [String], default: [] },
+    walletFunding: String
   },
-  firstSeen: { type: Date, default: Date.now },
-  lastUpdated: { type: Date, default: Date.now },
+
   reportCount: { type: Number, default: 1 },
   isActive: { type: Boolean, default: true }
-});
 
-walletSchema.pre('save', async function(next) {
-  if (this.isNew && !this.caseNumber) {
-    const lastWallet = await this.constructor.findOne().sort({ caseNumber: -1 });
-    this.caseNumber = lastWallet ? lastWallet.caseNumber + 1 : 1;
+}, { timestamps: true });
+
+/**
+ * ==========================
+ * RISK ENGINE
+ * ==========================
+ */
+walletSchema.methods.calculateRiskScore = function () {
+  if (this.forensic?.liquidityAfter === 0 &&
+      this.forensic?.liquidityBefore > 0) {
+    this.riskScore = 100;
+    return 100;
   }
-  this.lastUpdated = new Date();
-  next();
-});
 
-walletSchema.methods.calculateRiskScore = function() {
   let score = 0;
-  if (this.status === 'verified') score += 30;
-  if (this.verification.liquidityLocked === false) score += 40;
-  if (this.verification.victimsLoss > 100000) score += 20;
-  else if (this.verification.victimsLoss > 50000) score += 15;
-  else if (this.verification.victimsLoss > 10000) score += 10;
-  const patterns = this.verification.patternFound || [];
-  if (patterns.includes('liquidity_removal')) score += 10;
-  if (patterns.includes('team_dump')) score += 10;
-  this.riskScore = Math.min(score, 100);
+
+  if (this.forensic?.liquidityAfter < this.forensic?.liquidityBefore)
+    score += 40;
+
+  if (this.forensic?.detectedPattern?.includes('liquidity_removal'))
+    score += 40;
+
+  this.riskScore = Math.min(score, 99);
   return this.riskScore;
 };
+
+/**
+ * ==========================
+ * PRE SAVE
+ * ==========================
+ */
+walletSchema.pre('save', async function (next) {
+
+  if (this.isNew) {
+    const counter = await Counter.findOneAndUpdate(
+      { name: 'walletCase' },
+      { $inc: { seq: 1 } },
+      { new: true, upsert: true }
+    );
+    this.caseNumber = counter.seq;
+  }
+
+  this.calculateRiskScore();
+  next();
+});
 
 module.exports = mongoose.model('Wallet', walletSchema);
