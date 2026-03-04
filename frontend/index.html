@@ -1327,6 +1327,16 @@
         // UTILITY FUNCTIONS
         // ==========================================
         
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
         function debounce(func, wait) {
             let timeout;
             return function executedFunction(...args) {
@@ -1635,20 +1645,22 @@
 
         function createWalletRow(wallet) {
             const txHash = wallet.evidence?.txHash ?? '';
-            const txLink = txHash
-                ? `<a href="https://solscan.io/tx/${txHash}" target="_blank" rel="noopener noreferrer" class="wallet-table-link">${txHash.substring(0, 8)}...${txHash.substring(txHash.length - 8)}</a>`
+            // Validate txHash is a safe base58 string before using in URL
+            const safeTxHash = /^[1-9A-HJ-NP-Za-km-z]{8,}$/.test(txHash) ? escapeHtml(txHash) : '';
+            const txLink = safeTxHash
+                ? `<a href="https://solscan.io/tx/${safeTxHash}" target="_blank" rel="noopener noreferrer" class="wallet-table-link">${safeTxHash.substring(0, 8)}...${safeTxHash.substring(safeTxHash.length - 8)}</a>`
                 : '—';
             const statusClass = wallet.status === 'verified' ? 'status-confirmed' : 'status-suspicious';
 
             return `
                 <tr>
-                    <td>${wallet.caseNumber ?? '—'}</td>
-                    <td>${wallet.walletAddress ?? '—'}</td>
-                    <td>${wallet.tokenAddress ?? '—'}</td>
+                    <td>${escapeHtml(wallet.caseNumber) || '—'}</td>
+                    <td>${escapeHtml(wallet.walletAddress) || '—'}</td>
+                    <td>${escapeHtml(wallet.tokenAddress) || '—'}</td>
                     <td>${txLink}</td>
-                    <td>${wallet.evidence?.description ?? '—'}</td>
-                    <td><span class="status-badge ${statusClass}">${wallet.status ?? '—'}</span></td>
-                    <td>${wallet.riskScore ?? '—'}</td>
+                    <td>${escapeHtml(wallet.evidence?.description) || '—'}</td>
+                    <td><span class="status-badge ${statusClass}">${escapeHtml(wallet.status) || '—'}</span></td>
+                    <td>${escapeHtml(wallet.riskScore) || '—'}</td>
                 </tr>
             `;
         }
@@ -1783,7 +1795,7 @@
                     }
                     
                 } catch (error) {
-                    showFormMessage(`❌ <strong>Error:</strong> ${error.message}<br>Please try again or contact support if the problem persists.`, 'error');
+                    showFormMessage(`❌ <strong>Error:</strong> ${escapeHtml(error.message)}<br>Please try again or contact support if the problem persists.`, 'error');
                 } finally {
                     submitBtn.disabled = false;
                     submitBtn.innerHTML = originalText;

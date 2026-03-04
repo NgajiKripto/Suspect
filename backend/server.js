@@ -13,7 +13,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(helmet());
-app.use(cors());
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGIN || 'https://suspected.dev',
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'x402-payment']
+}));
 app.use(express.json());
 
 app.use('/api/', rateLimit({
@@ -59,14 +63,20 @@ WalletFunding:
 
 // STEP 2: Admin submit forensic via bot
 bot.on('message', async (msg) => {
+  // Only process messages from the authorized chat
+  if (String(msg.chat.id) !== String(chatId)) return;
+
   if (!msg.text.includes('LiquidityBefore')) return;
 
   const lines = msg.text.split('\n');
   const data = {};
 
   lines.forEach(line => {
-    const [key, value] = line.split(':');
-    if (key && value) data[key.trim()] = value.trim();
+    const colonIndex = line.indexOf(':');
+    if (colonIndex === -1) return;
+    const key = line.substring(0, colonIndex).trim();
+    const value = line.substring(colonIndex + 1).trim();
+    if (key && value) data[key] = value;
   });
 
   const wallet = await Wallet.findOne({ status: 'pending' })
@@ -98,6 +108,9 @@ bot.on('message', async (msg) => {
 
 // STEP 3: Verify only after forensic filled
 bot.on('callback_query', async (query) => {
+  // Only process callbacks from the authorized chat
+  if (String(query.message?.chat?.id) !== String(chatId)) return;
+
   const [action, id] = query.data.split('_');
 
   if (action !== 'verify') return;
@@ -126,21 +139,31 @@ bot.on('callback_query', async (query) => {
 
 // PUBLIC LIST
 app.get('/api/wallets', async (req, res) => {
-  const wallets = await Wallet.find({ status: 'verified' })
-    .select('-forensic -__v');
-  res.json(wallets);
+  try {
+    const wallets = await Wallet.find({ status: 'verified' })
+      .select('-forensic -__v');
+    res.json(wallets);
+  } catch (err) {
+    console.error('GET /api/wallets error:', err.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 // PUBLIC DETAIL
 app.get('/api/wallets/:address', async (req, res) => {
-  const wallet = await Wallet.findOne({
-    walletAddress: req.params.address,
-    status: 'verified'
-  }).select('-forensic');
+  try {
+    const wallet = await Wallet.findOne({
+      walletAddress: req.params.address,
+      status: 'verified'
+    }).select('-forensic');
 
-  if (!wallet) return res.status(404).json({ message: 'Not found' });
+    if (!wallet) return res.status(404).json({ message: 'Not found' });
 
-  res.json(wallet);
+    res.json(wallet);
+  } catch (err) {
+    console.error('GET /api/wallets/:address error:', err.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 /**
@@ -149,21 +172,33 @@ app.get('/api/wallets/:address', async (req, res) => {
 app.get('/api/wallets/:address/premium', async (req, res) => {
 
   const paid = req.headers['x402-payment'];
+  const validPaymentToken = process.env.X402_PAYMENT_SECRET;
 
-  if (!paid || paid !== 'valid') {
+  if (!paid || !validPaymentToken || paid !== validPaymentToken) {
     return res.status(402).json({
       message: 'Payment required via x402'
     });
   }
 
-  const wallet = await Wallet.findOne({
-    walletAddress: req.params.address,
-    status: 'verified'
-  });
+  try {
+    const wallet = await Wallet.findOne({
+      walletAddress: req.params.address,
+      status: 'verified'
+    });
 
-  res.json(wallet.forensic);
+    if (!wallet) return res.status(404).json({ message: 'Not found' });
+    if (!wallet.forensic) return res.status(404).json({ message: 'Forensic data not available' });
+
+    res.json(wallet.forensic);
+  } catch (err) {
+    console.error('GET /api/wallets/:address/premium error:', err.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on ${PORT}`);
+  if (!process.env.X402_PAYMENT_SECRET) {
+    console.warn('WARNING: X402_PAYMENT_SECRET is not set. The premium endpoint will reject all requests.');
+  }
 });
