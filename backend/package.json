@@ -19,6 +19,11 @@
     "liquidity-drain",
     "forensics"
   ],
+  "scripts": {
+  "test:security": "jest backend/tests/security.test.js",
+  "test:security:watch": "jest backend/tests/security.test.js --watch",
+  "prepush": "npm run test:security"  // Auto-run sebelum git push
+  },
   "author": "Suspected.dev",
   "license": "MIT",
   "dependencies": {
