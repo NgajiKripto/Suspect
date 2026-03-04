@@ -26,6 +26,13 @@ app.use('/api/', rateLimit({
   max: 100
 }));
 
+// Stricter rate limit for report submission — prevents spam and Telegram flood
+const submitRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { success: false, message: 'Too many reports submitted. Please try again later.' }
+});
+
 /**
  * ==========================
  * DATABASE
@@ -171,7 +178,7 @@ app.get('/api/wallets/:address', async (req, res) => {
 const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const TX_HASH_REGEX = /^[1-9A-HJ-NP-Za-km-z]{1,100}$/;
 
-app.post('/api/wallets', async (req, res) => {
+app.post('/api/wallets', submitRateLimit, async (req, res) => {
   try {
     // Only destructure known fields — reporterContact is intentionally excluded to avoid PII storage
     const { walletAddress, evidence, tokenAddress } = req.body;
