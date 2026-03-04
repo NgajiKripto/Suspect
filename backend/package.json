@@ -16,6 +16,11 @@
     "liquidity-drain",
     "forensics"
   ],
+  "scripts": {
+  "security:audit": "npm audit --audit-level=moderate",
+  "security:deps": "npx snyk test",
+  "security:lint": "npx eslint . --ext .js --rule 'security/detect-unsafe-regex: error'"
+  },
   "author": "Suspected.dev",
   "license": "MIT",
   "dependencies": {
