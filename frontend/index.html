@@ -1759,8 +1759,7 @@
                         description: document.getElementById('description').value.trim()
                     },
                     projectName: '', // Backend compatibility
-                    tokenAddress: document.getElementById('tokenAddress').value.trim() || undefined,
-                    reporterContact: document.getElementById('reporterContact').value.trim() || undefined
+                    tokenAddress: document.getElementById('tokenAddress').value.trim() || undefined
                 };
                 
                 try {
@@ -1778,7 +1777,7 @@
                         
                         showFormMessage(
                             `✅ <strong>Report Submitted Successfully!</strong><br><br>
-                             Case #${String(caseNum).padStart(2, '0')} ${isExisting ? 'updated' : 'created'}.<br>
+                             Case #${escapeHtml(String(caseNum).padStart(2, '0'))} ${isExisting ? 'updated' : 'created'}.<br>
                              ${isExisting ? 'Added to existing investigation.' : 'New investigation opened.'}<br><br>
                              <em>Will be reviewed by our analyst team within 48 hours.</em>`,
                             'success'
