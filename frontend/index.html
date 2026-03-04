@@ -1337,6 +1337,69 @@
                 .replace(/'/g, '&#039;');
         }
 
+        /**
+         * safeInnerHtml(element, content, options)
+         * XSS-safe innerHTML replacement that:
+         *   - Strips all HTML tags except those in allowedTags
+         *   - Removes all event-handler attributes (onclick, onerror, etc.) from allowed tags
+         *   - Returns the element for chaining
+         *
+         * Unit test examples:
+         *   safeInnerHtml(el, '<strong>Safe</strong>')
+         *     → el.innerHTML === '<strong>Safe</strong>'
+         *   safeInnerHtml(el, '<em>Click</em>')
+         *     → el.innerHTML === '<em>Click</em>'
+         *   safeInnerHtml(el, '<strong onclick="evil()">Hi</strong>')
+         *     → el.innerHTML === '<strong>Hi</strong>'
+         *   safeInnerHtml(el, '<script>alert(1)</script>text')
+         *     → el.innerHTML === 'text'
+         *   safeInnerHtml(el, '<img onerror="evil()" src="x">')
+         *     → el.innerHTML === ''
+         *   safeInnerHtml(el, '<strong>A</strong>', { allowedTags: [] })
+         *     → el.innerHTML === 'A'
+         */
+        function safeInnerHtml(element, content, options) {
+            const allowedTags = (options && Array.isArray(options.allowedTags))
+                ? options.allowedTags
+                : ['strong', 'em', 'br', 'code'];
+
+            // Raw-text elements whose inner text must never be surfaced
+            const RAW_TEXT_TAGS = ['script', 'style', 'template', 'textarea', 'noscript'];
+
+            // Parse the content in an inert <template> to avoid script execution
+            const tmpl = document.createElement('template');
+            tmpl.innerHTML = content;
+            const fragment = tmpl.content;
+
+            // Process in reverse document order so children are handled before parents
+            const allElements = Array.from(fragment.querySelectorAll('*')).reverse();
+            allElements.forEach(function(el) {
+                if (!el.parentNode) return; // already detached
+                const tag = el.tagName.toLowerCase();
+                if (!allowedTags.includes(tag)) {
+                    if (RAW_TEXT_TAGS.includes(tag)) {
+                        // Remove raw-text elements entirely — never expose their source text
+                        el.parentNode.removeChild(el);
+                    } else {
+                        // Unwrap: move children up to replace the disallowed element
+                        while (el.firstChild) {
+                            el.parentNode.insertBefore(el.firstChild, el);
+                        }
+                        el.parentNode.removeChild(el);
+                    }
+                    return;
+                }
+                // Strip all attributes from allowed elements (kills event handlers)
+                Array.from(el.attributes).forEach(function(attr) {
+                    el.removeAttribute(attr.name);
+                });
+            });
+
+            element.innerHTML = '';
+            element.appendChild(fragment);
+            return element;
+        }
+
         function debounce(func, wait) {
             let timeout;
             return function executedFunction(...args) {
@@ -1807,13 +1870,13 @@
             if (!messageDiv) return;
             
             messageDiv.className = type; // 'success' or 'error'
-            messageDiv.innerHTML = message;
+            safeInnerHtml(messageDiv, message);
             
             // Auto hide after 15 seconds for success
             if (type === 'success') {
                 setTimeout(() => {
                     messageDiv.className = '';
-                    messageDiv.innerHTML = '';
+                    safeInnerHtml(messageDiv, '');
                 }, 15000);
             }
         }
@@ -1865,7 +1928,7 @@
                 animation: slideIn 0.3s ease-out;
                 line-height: 1.5;
             `;
-            notification.innerHTML = message;
+            safeInnerHtml(notification, message);
 
             document.body.appendChild(notification);
 
