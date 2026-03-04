@@ -220,7 +220,27 @@ curl -s -I https://suspected.dev/api/wallets | grep -E \
 
 ---
 
-## 7. Environment Variable Checklist
+## 7. Subresource Integrity (SRI)
+
+All external stylesheets and scripts loaded from CDNs must include `integrity` and `crossorigin` attributes to prevent supply-chain attacks.
+
+| Resource | Tag | `integrity` | Status |
+|----------|-----|-------------|--------|
+| Font Awesome 6.4.0 `all.min.css` | `<link>` | `sha512-iecdLmaskl7CVkqkXNQ/ZH/XLlvWZOJyj7Yy7tcenmpD1ypASozpmT/E0iPtmFIB46ZmdtAc9eNBvH0H/ZpiBw==` | ✅ added |
+
+### Checklist for New CDN Resources
+
+When adding any new external `<link>` or `<script>` tag:
+
+- [ ] Generate the SRI hash: `openssl dgst -sha512 -binary <file> | openssl base64 -A` and prefix with `sha512-`
+- [ ] Add `integrity="sha512-<hash>"` to the tag
+- [ ] Add `crossorigin="anonymous"` to the tag
+- [ ] Add `referrerpolicy="no-referrer"` to the tag
+- [ ] Record the resource and its hash in the table above
+
+---
+
+## 8. Environment Variable Checklist
 
 Before deploying any new feature, ensure:
 
@@ -232,7 +252,7 @@ Before deploying any new feature, ensure:
 
 ---
 
-## 8. Reporting Vulnerabilities
+## 9. Reporting Vulnerabilities
 
 If you discover a security vulnerability, please contact the team privately before public disclosure.
 Do not open a GitHub issue for security bugs.
