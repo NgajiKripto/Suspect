@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+const crypto = require('crypto');
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -155,7 +156,7 @@ app.get('/api/wallets/:address', async (req, res) => {
     const wallet = await Wallet.findOne({
       walletAddress: req.params.address,
       status: 'verified'
-    }).select('-forensic');
+    }).select('-forensic -__v');
 
     if (!wallet) return res.status(404).json({ message: 'Not found' });
 
@@ -163,6 +164,74 @@ app.get('/api/wallets/:address', async (req, res) => {
   } catch (err) {
     console.error('GET /api/wallets/:address error:', err.message);
     res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// SUBMIT REPORT
+const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const TX_HASH_REGEX = /^[1-9A-HJ-NP-Za-km-z]{1,100}$/;
+
+app.post('/api/wallets', async (req, res) => {
+  try {
+    // Only destructure known fields — reporterContact is intentionally excluded to avoid PII storage
+    const { walletAddress, evidence, tokenAddress } = req.body;
+
+    // Validate wallet address (Solana base58, 32–44 chars)
+    if (!walletAddress || !WALLET_ADDRESS_REGEX.test(walletAddress)) {
+      return res.status(400).json({ success: false, message: 'Invalid wallet address format.' });
+    }
+
+    // Validate optional token address
+    if (tokenAddress && !WALLET_ADDRESS_REGEX.test(tokenAddress)) {
+      return res.status(400).json({ success: false, message: 'Invalid token address format.' });
+    }
+
+    // Validate description
+    const description = typeof evidence?.description === 'string' ? evidence.description.trim() : '';
+    if (description.length > 500) {
+      return res.status(400).json({ success: false, message: 'Description must be 500 characters or fewer.' });
+    }
+
+    // Validate projectName
+    const projectName = typeof req.body.projectName === 'string' ? req.body.projectName.trim() : '';
+    if (projectName.length > 100) {
+      return res.status(400).json({ success: false, message: 'Project name must be 100 characters or fewer.' });
+    }
+
+    // Validate txHash (base58, max 100 chars)
+    const txHash = typeof evidence?.txHash === 'string' ? evidence.txHash.trim() : '';
+    if (txHash && !TX_HASH_REGEX.test(txHash)) {
+      return res.status(400).json({ success: false, message: 'Invalid transaction hash format.' });
+    }
+
+    // If wallet already exists, increment report count
+    const existing = await Wallet.findOne({ walletAddress });
+    if (existing) {
+      existing.reportCount = (existing.reportCount || 0) + 1;
+      await existing.save();
+      return res.json({ success: true, message: 'Report added to existing case', data: { caseNumber: existing.caseNumber } });
+    }
+
+    // Create new wallet record
+    const wallet = new Wallet({
+      walletAddress,
+      evidence: {
+        txHash: txHash || undefined,
+        description: description || undefined
+      },
+      projectName: projectName || undefined,
+      tokenAddress: tokenAddress || undefined
+    });
+
+    await wallet.save();
+
+    // Notify admin via Telegram
+    await requestForensicInput(wallet);
+
+    return res.status(201).json({ success: true, message: 'Report submitted', data: { caseNumber: wallet.caseNumber } });
+  } catch (err) {
+    console.error('POST /api/wallets error:', err.message);
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
@@ -174,10 +243,23 @@ app.get('/api/wallets/:address/premium', async (req, res) => {
   const paid = req.headers['x402-payment'];
   const validPaymentToken = process.env.X402_PAYMENT_SECRET;
 
-  if (!paid || !validPaymentToken || paid !== validPaymentToken) {
+  if (!paid || !validPaymentToken) {
     return res.status(402).json({
       message: 'Payment required via x402'
     });
+  }
+
+  // Use timing-safe comparison to prevent timing attacks
+  try {
+    const paidBuf = Buffer.from(paid);
+    const validBuf = Buffer.from(validPaymentToken);
+    if (paidBuf.length !== validBuf.length || !crypto.timingSafeEqual(paidBuf, validBuf)) {
+      return res.status(402).json({
+        message: 'Payment required via x402'
+      });
+    }
+  } catch {
+    return res.status(402).json({ message: 'Payment required via x402' });
   }
 
   try {
