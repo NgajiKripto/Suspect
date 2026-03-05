@@ -620,6 +620,17 @@
             display: block;
             margin-top: 5px;
         }
+        .form-hint-warning {
+            color: var(--warning-orange);
+            font-size: 0.75rem;
+            display: block;
+            margin-top: 5px;
+        }
+        .form-hint-warning .privacy-icon {
+            margin-right: 4px;
+            cursor: help;
+            opacity: 0.9;
+        }
         .char-counter {
             font-size: 0.75rem;
             text-align: right;
@@ -1266,6 +1277,10 @@
                                id="reporterContact" 
                                class="form-control" 
                                placeholder="Telegram @username or Email">
+                        <span class="form-hint-warning">
+                            <i class="fa-solid fa-info-circle privacy-icon" aria-hidden="true" title="This field is never sent to our servers. It exists purely for your own reference — e.g., to remind yourself which account you used when submitting this report."></i>
+                            For privacy reasons, contact info is <strong>NOT</strong> transmitted to our servers. Use this only for your own reference.
+                        </span>
                     </div>
                     
                     <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;" id="submitBtn">
