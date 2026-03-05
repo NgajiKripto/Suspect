@@ -6,6 +6,43 @@
     <meta name="theme-color" content="#FF4500">
     <title>SUSPECTED — On-Chain Risk Registry</title>
     <meta name="description" content="Experimental registry for tracking suspicious on-chain patterns on the Solana network. Manually verified by analysts.">
+    <!--
+        STRICT-MODE CSP (production, nonce-based) — migration steps:
+          1. Generate a unique cryptographic nonce per request server-side (e.g. crypto.randomBytes(16).toString('base64')).
+          2. Replace 'unsafe-inline' in script-src with 'nonce-{NONCE_VALUE}'.
+          3. Add nonce="{NONCE_VALUE}" attribute to every <script> and <style> tag in this file.
+          4. Move all inline <script> blocks to an external .js file served from 'self', then you can
+             remove 'unsafe-inline' from script-src entirely and rely solely on 'nonce-{NONCE_VALUE}'.
+          5. Move all inline <style> blocks to an external .css file and remove 'unsafe-inline' from style-src.
+
+        NOTE: The current tag below includes http://localhost:3000 in connect-src for local
+        development. When deploying to production, remove http://localhost:3000 from connect-src
+        so that only https://suspected.dev is whitelisted for network requests.
+
+        Strict-mode meta tag (replace the tag below once migration is complete):
+        <meta http-equiv="Content-Security-Policy" content="
+            default-src 'none';
+            script-src 'self' 'nonce-{NONCE_VALUE}';
+            style-src 'self' 'nonce-{NONCE_VALUE}' https://cdnjs.cloudflare.com;
+            img-src 'self' https:;
+            connect-src 'self' https://suspected.dev;
+            font-src 'self' https://cdnjs.cloudflare.com;
+            frame-src 'self' https://api.producthunt.com;
+            object-src 'none';
+            base-uri 'self';
+            form-action 'self'">
+    -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'none';
+        script-src 'self' 'unsafe-inline';
+        style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com;
+        img-src 'self' https:;
+        connect-src 'self' https://suspected.dev http://localhost:3000;
+        font-src 'self' https://cdnjs.cloudflare.com;
+        frame-src 'self' https://api.producthunt.com;
+        object-src 'none';
+        base-uri 'self';
+        form-action 'self'">
     <link rel="icon" type="image/x-icon" href="/favicon.ico">
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
