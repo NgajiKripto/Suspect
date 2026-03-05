@@ -96,11 +96,28 @@
             --border-color: #CCCCCC;
             --border-secondary: #E5E7EB;
             --scanline-opacity: 0.08;
+            /* WCAG 1.4.3: #FF4500 only achieves ~3.2:1 on the cream #F4F1EA background.
+               #B83200 achieves ≥4.5:1 on both white (#FFFFFF) and cream (#F4F1EA). */
+            --hazard-orange: #B83200;
+            --hazard-dim: #8B2600;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html { scroll-behavior: smooth; }
         
+        /* Visually hidden but accessible to screen readers (WCAG 1.3.1) */
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
         /* Skip to content link */
         .skip-to-content {
             position: absolute;
@@ -247,6 +264,9 @@
             font-size: 1.5rem; 
             cursor: pointer; 
             order: 3;
+            background: none;
+            border: none;
+            padding: 0;
         }
         
         .theme-toggle {
@@ -1101,9 +1121,9 @@
                          class="logo-image logo-light">
                 </a>
                 
-                <div class="menu-toggle" onclick="toggleMenu()" aria-label="Toggle navigation menu">
+                <button type="button" class="menu-toggle" id="menuToggle" onclick="toggleMenu()" aria-label="Toggle navigation menu" aria-expanded="false" aria-controls="navLinks">
                     <i class="fa-solid fa-bars"></i>
-                </div>
+                </button>
                 
                 <!-- Desktop: Theme Toggle -->
                 <button type="button" class="theme-toggle" id="themeToggle" aria-label="Switch to light mode">
@@ -1205,8 +1225,11 @@
                 </p>
             </div>
 
+            <!-- Visually hidden live region for wallet loading status (WCAG 4.1.3) -->
+            <div id="wallet-status-announce" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
             <!-- Container for API data -->
-            <div class="max-w-5xl mt-12" id="wallet-list-container">
+            <div class="max-w-5xl mt-12" id="wallet-list-container" role="region" aria-label="Verified scammer wallet database">
                 <div class="loading-container">
                     <i class="fa-solid fa-circle-notch fa-spin"></i>
                     <h3>Loading Verified Database</h3>
@@ -1275,7 +1298,7 @@
                         <i class="fa-solid fa-paper-plane"></i> Submit Report
                     </button>
                     
-                    <div id="formMessage"></div>
+                    <div id="formMessage" aria-live="polite" aria-atomic="true"></div>
                     
                     <p style="text-align: center; margin-top: 20px; font-size: 0.8rem; color: var(--gray-666);">
                         <i class="fa-solid fa-shield-alt"></i> 
@@ -1510,7 +1533,11 @@
         
         function toggleMenu() {
             const nav = document.getElementById('navLinks');
-            nav.classList.toggle('active');
+            const toggle = document.getElementById('menuToggle');
+            const isExpanded = nav.classList.toggle('active');
+            if (toggle) {
+                toggle.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+            }
         }
 
         // ==========================================
@@ -1650,6 +1677,20 @@
         // API: LOAD VERIFIED WALLETS
         // ==========================================
         
+        /**
+         * Announces a brief wallet-loading status to screen readers via the
+         * visually-hidden live region (WCAG 4.1.3 — Status Messages).
+         * Resets after 1 s so the same message can re-trigger on next refresh.
+         */
+        function announceWalletStatus(message) {
+            const announcer = document.getElementById('wallet-status-announce');
+            if (!announcer) return;
+            announcer.textContent = message;
+            // Use a 3 s delay so screen readers have time to finish reading before the
+            // text is cleared — allowing the same message to re-trigger on next refresh.
+            setTimeout(function() { announcer.textContent = ''; }, 3000);
+        }
+
         async function loadVerifiedWallets() {
             // Prevent overlapping requests
             if (isLoadingWallets) return;
@@ -1679,6 +1720,7 @@
                             </a>
                         </div>
                     `;
+                    announceWalletStatus('Wallet database is being populated. No entries yet.');
                     return;
                 }
                 
@@ -1702,6 +1744,7 @@
                         </table>
                     </div>
                 `;
+                announceWalletStatus(`Wallet database updated. ${result.data.length} verified ${result.data.length === 1 ? 'wallet' : 'wallets'} loaded.`);
                 
             } catch (error) {
                 console.error('Failed to load wallets:', error);
@@ -1715,6 +1758,7 @@
                         </button>
                     </div>
                 `;
+                announceWalletStatus('Error loading wallet database. Please retry.');
                 const retryBtn = document.getElementById('retryLoadBtn');
                 if (retryBtn) {
                     retryBtn.addEventListener('click', loadVerifiedWallets);
@@ -1915,12 +1959,16 @@
             if (!messageDiv) return;
             
             messageDiv.className = type; // 'success' or 'error'
+            // WCAG 4.1.3: use role="alert" (assertive) for errors, role="status" (polite) for success.
+            // The aria-live="polite" on the element handles refresh; role overrides for errors.
+            messageDiv.setAttribute('role', type === 'error' ? 'alert' : 'status');
             safeInnerHtml(messageDiv, message);
             
             // Auto hide after 15 seconds for success
             if (type === 'success') {
                 setTimeout(() => {
                     messageDiv.className = '';
+                    messageDiv.removeAttribute('role');
                     safeInnerHtml(messageDiv, '');
                 }, 15000);
             }
@@ -1956,6 +2004,8 @@
 
             const notification = document.createElement('div');
             notification.className = 'notification-toast';
+            notification.setAttribute('role', 'status');
+            notification.setAttribute('aria-live', 'polite');
             notification.style.cssText = `
                 position: fixed;
                 top: 90px;
