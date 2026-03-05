@@ -1271,18 +1271,6 @@
                         <div class="char-counter" id="charCounter">0 / 500</div>
                     </div>
                     
-                    <div class="form-group">
-                        <label for="reporterContact" class="form-label">Contact (Optional — for follow-up)</label>
-                        <input type="text" 
-                               id="reporterContact" 
-                               class="form-control" 
-                               placeholder="Telegram @username or Email">
-                        <span class="form-hint-warning">
-                            <i class="fa-solid fa-info-circle privacy-icon" aria-hidden="true" title="This field is never sent to our servers. It exists purely for your own reference — e.g., to remind yourself which account you used when submitting this report."></i>
-                            For privacy reasons, contact info is <strong>NOT</strong> transmitted to our servers. Use this only for your own reference.
-                        </span>
-                    </div>
-                    
                     <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;" id="submitBtn">
                         <i class="fa-solid fa-paper-plane"></i> Submit Report
                     </button>
@@ -1894,7 +1882,8 @@
                             `✅ <strong>Report Submitted Successfully!</strong><br><br>
                              Case #${escapeHtml(String(caseNum).padStart(2, '0'))} ${isExisting ? 'updated' : 'created'}.<br>
                              ${isExisting ? 'Added to existing investigation.' : 'New investigation opened.'}<br><br>
-                             <em>Will be reviewed by our analyst team within 48 hours.</em>`,
+                             <em>Will be reviewed by our analyst team within 48 hours.</em><br><br>
+                             💡 <strong>Tip:</strong> Save your Case # for reference. If you need to follow up, contact us via Telegram <a href="https://t.me/suspecteddotdev" target="_blank" rel="noopener noreferrer">@suspecteddotdev</a> with your Case #.`,
                             'success'
                         );
                         
