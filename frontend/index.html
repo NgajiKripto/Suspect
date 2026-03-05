@@ -1106,7 +1106,7 @@
                 </div>
                 
                 <!-- Desktop: Theme Toggle -->
-                <button class="theme-toggle" id="themeToggle" aria-label="Switch to light mode">
+                <button type="button" class="theme-toggle" id="themeToggle" aria-label="Switch to light mode">
                     <i class="fa-solid fa-moon"></i>
                 </button>
                 
@@ -1116,7 +1116,7 @@
                     <a href="#submit-report">Submit Report</a>
                     
                     <!-- Mobile: Theme Toggle -->
-                    <button class="theme-toggle" id="themeToggleMobile" aria-label="Switch to light mode">
+                    <button type="button" class="theme-toggle" id="themeToggleMobile" aria-label="Switch to light mode">
                         <i class="fa-solid fa-moon"></i>
                     </button>
                 </div>
@@ -1710,11 +1710,15 @@
                         <i class="fa-solid fa-triangle-exclamation"></i>
                         <h3>Connection Error</h3>
                         <p>Failed to connect to database.<br>Please refresh or try again later.</p>
-                        <button onclick="loadVerifiedWallets()" class="btn btn-outline" style="margin-top: 15px;">
+                        <button type="button" id="retryLoadBtn" class="btn btn-outline" style="margin-top: 15px;" aria-label="Retry loading wallets">
                             <i class="fa-solid fa-rotate-right"></i> Retry
                         </button>
                     </div>
                 `;
+                const retryBtn = document.getElementById('retryLoadBtn');
+                if (retryBtn) {
+                    retryBtn.addEventListener('click', loadVerifiedWallets);
+                }
             } finally {
                 isLoadingWallets = false;
             }
