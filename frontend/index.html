@@ -2033,6 +2033,49 @@
             }
         `;
         document.head.appendChild(notifStyle);
+
+        // ==========================================
+        // DEV-ONLY: CSP DIAGNOSTICS (localhost only)
+        // ==========================================
+        if (location.hostname === 'localhost') {
+            // 1. Warn if no CSP meta tag is present in the document
+            (function() {
+                const cspMeta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+                if (!cspMeta) {
+                    console.warn(
+                        '[CSP Dev Check] \u26a0\ufe0f No Content-Security-Policy meta tag detected. ' +
+                        'Add a <meta http-equiv="Content-Security-Policy" \u2026> tag or serve the page ' +
+                        'with a Content-Security-Policy HTTP response header to protect against XSS.'
+                    );
+
+                    // 3. Show a non-intrusive bottom banner (dev awareness only)
+                    const banner = document.createElement('div');
+                    banner.id = 'csp-dev-banner';
+                    banner.style.cssText = [
+                        'position:fixed', 'bottom:0', 'left:0', 'right:0', 'z-index:99999',
+                        'background:#92400e', 'color:#fef3c7', 'font-family:monospace',
+                        'font-size:12px', 'padding:6px 16px', 'text-align:center',
+                        'pointer-events:none', 'letter-spacing:0.03em'
+                    ].join(';');
+                    banner.textContent = '\u26a0\ufe0f [DEV] No Content-Security-Policy detected \u2014 see console for details.';
+                    document.body.appendChild(banner);
+                }
+            })();
+
+            // 2. Report CSP violations to the console
+            document.addEventListener('securitypolicyviolation', function(e) {
+                console.warn(
+                    '[CSP Dev Check] \u{1F6A8} CSP Violation:',
+                    '\n  Blocked URI      :', e.blockedURI,
+                    '\n  Violated Dir.    :', e.violatedDirective,
+                    '\n  Effective Dir.   :', e.effectiveDirective,
+                    '\n  Original Policy  :', e.originalPolicy,
+                    '\n  Disposition      :', e.disposition,
+                    '\n  Source File      :', e.sourceFile,
+                    '\n  Line / Column    :', e.lineNumber, '/', e.columnNumber
+                );
+            });
+        }
     </script>
 </body>
 </html>
