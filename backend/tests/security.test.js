@@ -24,7 +24,7 @@ const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const TX_HASH_REGEX = /^[1-9A-HJ-NP-Za-km-z]{1,100}$/;
 
 // ─── Build a lightweight test app that mimics server.js validation ───────────
-function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5 } = {}) {
+function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecret = 'admin-secret' } = {}) {
   const app = express();
   app.use(helmet());
   app.use(express.json());
@@ -68,7 +68,37 @@ function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5 } = {}) {
       return res.status(402).json({ message: 'Payment required via x402' });
     }
 
-    res.json({ liquidityBefore: 100000, liquidityAfter: 0, drainDurationHours: 2 });
+    res.json({
+      forensic: { liquidityBefore: 100000, liquidityAfter: 0, drainDurationHours: 2 },
+      premiumForensics: {
+        addLiquidityValue: '45.2 SOL',
+        removeLiquidityValue: '0.3 SOL',
+        walletFunding: 'Tornado Cash',
+        tokensCreated: ['TokenAddr1111111111111111111111111111111111'],
+        forensicNotes: 'Repeat offender pattern detected',
+        crossProjectLinks: ['RelatedAddr111111111111111111111111111111111'],
+        updatedAt: new Date().toISOString()
+      }
+    });
+  });
+
+  // Admin endpoint — update premiumForensics
+  app.post('/api/admin/wallets/:address/premium-forensics', (req, res) => {
+    const adminToken = req.headers['x-admin-token'];
+    if (!adminToken || !adminSecret) return res.status(403).json({ message: 'Forbidden' });
+
+    try {
+      const tokenBuf = Buffer.from(adminToken);
+      const validBuf = Buffer.from(adminSecret);
+      if (tokenBuf.length !== validBuf.length || !crypto.timingSafeEqual(tokenBuf, validBuf)) {
+        return res.status(403).json({ message: 'Forbidden' });
+      }
+    } catch {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const { addLiquidityValue, removeLiquidityValue, walletFunding, tokensCreated, forensicNotes, crossProjectLinks } = req.body;
+    res.json({ success: true, premiumForensics: { addLiquidityValue, removeLiquidityValue, walletFunding, tokensCreated, forensicNotes, crossProjectLinks, updatedAt: new Date().toISOString() } });
   });
 
   // Submit report — with strict rate limit
@@ -244,7 +274,8 @@ describe('4. Authorization — Premium Endpoint', () => {
       .get(`/api/wallets/${VALID_ADDRESS}/premium`)
       .set('x402-payment', secret);
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('liquidityBefore');
+    expect(res.body).toHaveProperty('forensic');
+    expect(res.body).toHaveProperty('premiumForensics');
   });
 
   test('returns 402 for empty string token', async () => {
@@ -284,6 +315,7 @@ describe('6. Data Sensitivity — reporterContact not returned', () => {
     wallets.forEach(w => {
       expect(w).not.toHaveProperty('reporterContact');
       expect(w).not.toHaveProperty('forensic');
+      expect(w).not.toHaveProperty('premiumForensics');
     });
   });
 
@@ -291,6 +323,7 @@ describe('6. Data Sensitivity — reporterContact not returned', () => {
     const res = await request(app).get(`/api/wallets/${VALID_ADDRESS}`);
     expect(res.status).toBe(200);
     expect(res.body).not.toHaveProperty('forensic');
+    expect(res.body).not.toHaveProperty('premiumForensics');
     expect(res.body).not.toHaveProperty('reporterContact');
   });
 
@@ -318,5 +351,96 @@ describe('7. Security Headers — Helmet', () => {
   test('X-Frame-Options header is set', async () => {
     const res = await request(app).get('/api/wallets');
     expect(res.headers['x-frame-options']).toBeDefined();
+  });
+});
+
+describe('8. Premium Forensics — x402 gating', () => {
+  const secret = 'premium-test-secret-xyz';
+  const app = buildTestApp({ paymentSecret: secret });
+
+  test('premium endpoint returns premiumForensics with valid x402 token', async () => {
+    const res = await request(app)
+      .get(`/api/wallets/${VALID_ADDRESS}/premium`)
+      .set('x402-payment', secret);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('premiumForensics');
+    expect(res.body.premiumForensics).toHaveProperty('addLiquidityValue');
+    expect(res.body.premiumForensics).toHaveProperty('removeLiquidityValue');
+    expect(res.body.premiumForensics).toHaveProperty('walletFunding');
+    expect(res.body.premiumForensics).toHaveProperty('tokensCreated');
+    expect(res.body.premiumForensics).toHaveProperty('forensicNotes');
+    expect(res.body.premiumForensics).toHaveProperty('crossProjectLinks');
+    expect(res.body.premiumForensics).toHaveProperty('updatedAt');
+  });
+
+  test('premiumForensics.tokensCreated is an array', async () => {
+    const res = await request(app)
+      .get(`/api/wallets/${VALID_ADDRESS}/premium`)
+      .set('x402-payment', secret);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.premiumForensics.tokensCreated)).toBe(true);
+  });
+
+  test('premiumForensics.crossProjectLinks is an array', async () => {
+    const res = await request(app)
+      .get(`/api/wallets/${VALID_ADDRESS}/premium`)
+      .set('x402-payment', secret);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.premiumForensics.crossProjectLinks)).toBe(true);
+  });
+
+  test('premium endpoint returns 402 without valid token (premiumForensics not leaked)', async () => {
+    const res = await request(app).get(`/api/wallets/${VALID_ADDRESS}/premium`);
+    expect(res.status).toBe(402);
+    expect(res.body).not.toHaveProperty('premiumForensics');
+  });
+});
+
+describe('9. Admin Endpoint — POST /api/admin/wallets/:address/premium-forensics', () => {
+  const adminSec = 'admin-secret-token-abc';
+  const app = buildTestApp({ adminSecret: adminSec });
+
+  const premiumPayload = {
+    addLiquidityValue: '45.2 SOL',
+    removeLiquidityValue: '0.3 SOL',
+    walletFunding: 'Tornado Cash',
+    tokensCreated: ['TokenAddr1111111111111111111111111111111111'],
+    forensicNotes: 'Repeat offender',
+    crossProjectLinks: ['RelatedAddr111111111111111111111111111111111']
+  };
+
+  test('returns 403 without admin token', async () => {
+    const res = await request(app)
+      .post(`/api/admin/wallets/${VALID_ADDRESS}/premium-forensics`)
+      .send(premiumPayload);
+    expect(res.status).toBe(403);
+  });
+
+  test('returns 403 with wrong admin token', async () => {
+    const res = await request(app)
+      .post(`/api/admin/wallets/${VALID_ADDRESS}/premium-forensics`)
+      .set('x-admin-token', 'wrong-token')
+      .send(premiumPayload);
+    expect(res.status).toBe(403);
+  });
+
+  test('returns 200 with correct admin token and updates premiumForensics', async () => {
+    const res = await request(app)
+      .post(`/api/admin/wallets/${VALID_ADDRESS}/premium-forensics`)
+      .set('x-admin-token', adminSec)
+      .send(premiumPayload);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.premiumForensics).toHaveProperty('addLiquidityValue', '45.2 SOL');
+    expect(res.body.premiumForensics).toHaveProperty('walletFunding', 'Tornado Cash');
+    expect(res.body.premiumForensics).toHaveProperty('updatedAt');
+  });
+
+  test('returns 403 with empty admin token string', async () => {
+    const res = await request(app)
+      .post(`/api/admin/wallets/${VALID_ADDRESS}/premium-forensics`)
+      .set('x-admin-token', '')
+      .send(premiumPayload);
+    expect(res.status).toBe(403);
   });
 });
