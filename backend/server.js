@@ -114,6 +114,51 @@ bot.on('message', async (msg) => {
   );
 });
 
+// STEP 2b: Admin submit premium forensics via bot
+const ALLOWED_PREMIUM_KEYS = new Set([
+  'AddLiquidityValue', 'RemoveLiquidityValue', 'WalletFunding',
+  'TokensCreated', 'ForensicNotes', 'CrossProjectLinks', 'WalletId'
+]);
+
+bot.on('message', async (msg) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+  if (!msg.text || !msg.text.includes('AddLiquidityValue')) return;
+  if (!msg.text.includes('WalletId')) return;
+
+  const lines = msg.text.split('\n');
+  const data = {};
+
+  lines.forEach(line => {
+    const colonIndex = line.indexOf(':');
+    if (colonIndex === -1) return;
+    const key = line.substring(0, colonIndex).trim();
+    const value = line.substring(colonIndex + 1).trim();
+    if (key && value && ALLOWED_PREMIUM_KEYS.has(key)) data[key] = value;
+  });
+
+  if (!data.WalletId) return;
+
+  const wallet = await Wallet.findById(data.WalletId);
+  if (!wallet) {
+    await bot.sendMessage(chatId, `❌ Wallet ID tidak ditemukan: ${data.WalletId}`);
+    return;
+  }
+
+  wallet.set('premiumForensics', {
+    addLiquidityValue: data.AddLiquidityValue || null,
+    removeLiquidityValue: data.RemoveLiquidityValue || null,
+    walletFunding: data.WalletFunding || null,
+    tokensCreated: data.TokensCreated ? data.TokensCreated.split(',').map(s => s.trim()).filter(Boolean) : [],
+    forensicNotes: data.ForensicNotes || null,
+    crossProjectLinks: data.CrossProjectLinks ? data.CrossProjectLinks.split(',').map(s => s.trim()).filter(Boolean) : [],
+    updatedAt: new Date()
+  });
+
+  await wallet.save();
+
+  await bot.sendMessage(chatId, `🔐 Premium forensics saved for Case #${wallet.caseNumber}.`);
+});
+
 // STEP 3: Verify only after forensic filled
 bot.on('callback_query', async (query) => {
   // Only process callbacks from the authorized chat
@@ -121,22 +166,39 @@ bot.on('callback_query', async (query) => {
 
   const [action, id] = query.data.split('_');
 
-  if (action !== 'verify') return;
+  if (action === 'verify') {
+    const wallet = await Wallet.findById(id);
 
-  const wallet = await Wallet.findById(id);
+    if (!wallet.forensic?.liquidityBefore) {
+      return bot.answerCallbackQuery(query.id, {
+        text: 'Isi forensic dulu!'
+      });
+    }
 
-  if (!wallet.forensic?.liquidityBefore) {
-    return bot.answerCallbackQuery(query.id, {
-      text: 'Isi forensic dulu!'
-    });
+    wallet.status = 'verified';
+    await wallet.save();
+
+    await bot.sendMessage(chatId,
+      `✅ Case #${wallet.caseNumber} Verified\nRisk Score: ${wallet.riskScore}`,
+      {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '🔐 Set Premium Forensics', callback_data: `setpremium_${wallet._id}` }
+          ]]
+        }
+      }
+    );
   }
 
-  wallet.status = 'verified';
-  await wallet.save();
+  if (action === 'setpremium') {
+    const wallet = await Wallet.findById(id);
+    if (!wallet) return;
 
-  await bot.sendMessage(chatId,
-    `✅ Case #${wallet.caseNumber} Verified\nRisk Score: ${wallet.riskScore}`
-  );
+    await bot.answerCallbackQuery(query.id, { text: 'Kirim data premium forensic.' });
+    await bot.sendMessage(chatId,
+      `📋 Case #${wallet.caseNumber} — Premium Forensics\n\nKirim dengan format:\n\nAddLiquidityValue:\nRemoveLiquidityValue:\nWalletFunding:\nTokensCreated:\nForensicNotes:\nCrossProjectLinks:\nWalletId: ${wallet._id}`
+    );
+  }
 });
 
 /**
@@ -149,7 +211,7 @@ bot.on('callback_query', async (query) => {
 app.get('/api/wallets', async (req, res) => {
   try {
     const wallets = await Wallet.find({ status: 'verified' })
-      .select('-forensic -__v');
+      .select('-forensic -premiumForensics -__v');
     res.json(wallets);
   } catch (err) {
     console.error('GET /api/wallets error:', err.message);
@@ -163,7 +225,7 @@ app.get('/api/wallets/:address', async (req, res) => {
     const wallet = await Wallet.findOne({
       walletAddress: req.params.address,
       status: 'verified'
-    }).select('-forensic -__v');
+    }).select('-forensic -premiumForensics -__v');
 
     if (!wallet) return res.status(404).json({ message: 'Not found' });
 
@@ -276,11 +338,68 @@ app.get('/api/wallets/:address/premium', async (req, res) => {
     });
 
     if (!wallet) return res.status(404).json({ message: 'Not found' });
-    if (!wallet.forensic) return res.status(404).json({ message: 'Forensic data not available' });
 
-    res.json(wallet.forensic);
+    res.json({
+      forensic: wallet.forensic || null,
+      premiumForensics: wallet.premiumForensics || null
+    });
   } catch (err) {
     console.error('GET /api/wallets/:address/premium error:', err.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+/**
+ * ADMIN ENDPOINT — Update premiumForensics (X-Admin-Token required)
+ */
+app.post('/api/admin/wallets/:address/premium-forensics', async (req, res) => {
+  const adminToken = req.headers['x-admin-token'];
+  const validAdminToken = process.env.ADMIN_SECRET;
+
+  if (!adminToken || !validAdminToken) {
+    return res.status(403).json({ message: 'Forbidden' });
+  }
+
+  try {
+    const tokenBuf = Buffer.from(adminToken);
+    const validBuf = Buffer.from(validAdminToken);
+    if (tokenBuf.length !== validBuf.length || !crypto.timingSafeEqual(tokenBuf, validBuf)) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+  } catch {
+    return res.status(403).json({ message: 'Forbidden' });
+  }
+
+  try {
+    const wallet = await Wallet.findOne({ walletAddress: req.params.address });
+    if (!wallet) return res.status(404).json({ message: 'Not found' });
+
+    const {
+      addLiquidityValue,
+      removeLiquidityValue,
+      walletFunding,
+      tokensCreated,
+      forensicNotes,
+      crossProjectLinks
+    } = req.body;
+
+    const update = { updatedAt: new Date() };
+    if (addLiquidityValue !== undefined) update.addLiquidityValue = String(addLiquidityValue);
+    if (removeLiquidityValue !== undefined) update.removeLiquidityValue = String(removeLiquidityValue);
+    if (walletFunding !== undefined) update.walletFunding = String(walletFunding);
+    if (Array.isArray(tokensCreated)) update.tokensCreated = tokensCreated.map(String);
+    if (forensicNotes !== undefined) update.forensicNotes = String(forensicNotes);
+    if (Array.isArray(crossProjectLinks)) update.crossProjectLinks = crossProjectLinks.map(String);
+
+    wallet.set('premiumForensics', Object.assign(
+      wallet.premiumForensics ? wallet.premiumForensics.toObject() : {},
+      update
+    ));
+    await wallet.save();
+
+    res.json({ success: true, premiumForensics: wallet.premiumForensics });
+  } catch (err) {
+    console.error('POST /api/admin/wallets/:address/premium-forensics error:', err.message);
     res.status(500).json({ message: 'Internal server error' });
   }
 });

@@ -53,10 +53,24 @@ const walletSchema = new mongoose.Schema({
     walletFunding: String
   },
 
+  // 🔐 PREMIUM FORENSICS — x402 gated ($0.11 payment required)
+  premiumForensics: {
+    addLiquidityValue: { type: String, default: null },      // Value saat add liquidity, e.g. "45.2 SOL"
+    removeLiquidityValue: { type: String, default: null },   // Value saat remove liquidity, e.g. "0.3 SOL"
+    walletFunding: { type: String, default: null },          // Source of initial funds, e.g. "Tornado Cash"
+    tokensCreated: { type: [String], default: [] },          // List token yang pernah dibuat
+    forensicNotes: { type: String, default: null },          // Admin internal notes on pattern analysis
+    crossProjectLinks: { type: [String], default: [] },      // Related wallets showing repeat offender pattern
+    updatedAt: { type: Date, default: null }
+  },
+
   reportCount: { type: Number, default: 1 },
   isActive: { type: Boolean, default: true }
 
 }, { timestamps: true });
+
+// Index for efficient cross-reference queries on tokensCreated
+walletSchema.index({ 'premiumForensics.tokensCreated': 1 });
 
 /**
  * ==========================
