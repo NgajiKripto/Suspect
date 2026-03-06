@@ -1431,7 +1431,7 @@
 
             // Parse the content in an inert <template> to avoid script execution
             const tmpl = document.createElement('template');
-            tmpl.innerHTML = content;
+            tmpl.innerHTML = content; // sc-ok — inert <template> element; scripts inside cannot execute
             const fragment = tmpl.content;
 
             // Process in reverse document order so children are handled before parents
@@ -1949,7 +1949,7 @@
                     showFormMessage(`❌ <strong>Error:</strong> ${escapeHtml(error.message)}<br>Please try again or contact support if the problem persists.`, 'error');
                 } finally {
                     submitBtn.disabled = false;
-                    submitBtn.innerHTML = originalText;
+                    submitBtn.innerHTML = originalText; // sc-ok — restores developer-authored button HTML; never assigned user input
                 }
             });
         }
