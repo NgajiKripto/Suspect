@@ -1,6 +1,8 @@
 require('dotenv').config();
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -16,8 +18,8 @@ const PORT = process.env.PORT || 3000;
 app.use(helmet());
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || 'https://suspected.dev',
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'x402-payment']
+  methods: ['GET', 'POST', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'x402-payment', 'x-admin-token', 'x-telegram-admin-token']
 }));
 app.use(express.json());
 
@@ -32,6 +34,29 @@ const submitRateLimit = rateLimit({
   max: 5,
   message: { success: false, message: 'Too many reports submitted. Please try again later.' }
 });
+
+// Rate limit for admin premium update endpoint — max 20 per hour per admin token
+const adminPremiumRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => {
+    const token = req.headers['x-telegram-admin-token'] || req.headers['x402-payment'] || req.ip;
+    // Hash the token so the raw credential is not stored as a rate-limit key in memory
+    return crypto.createHash('sha256').update(String(token)).digest('hex');
+  },
+  message: { success: false, message: 'Rate limit exceeded. Max 20 updates per hour per admin token.' }
+});
+
+// Validation patterns for premiumForensics fields
+const LIQUIDITY_VALUE_REGEX = /^\d+(\.\d+)?\s*(SOL|USDC|USD)?$/i;
+const HTML_TAG_REGEX = /<[^>]*>/;
+
+// Audit logger — writes only to admin_audit.log, never to console
+const AUDIT_LOG_PATH = path.join(__dirname, 'admin_audit.log');
+function writeAdminAuditLog(entry) {
+  const line = JSON.stringify(entry) + '\n';
+  fs.appendFile(AUDIT_LOG_PATH, line, () => { /* intentionally silent */ });
+}
 
 /**
  * ==========================
@@ -401,6 +426,160 @@ app.post('/api/admin/wallets/:address/premium-forensics', async (req, res) => {
   } catch (err) {
     console.error('POST /api/admin/wallets/:address/premium-forensics error:', err.message);
     res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+/**
+ * ADMIN PATCH ENDPOINT — Partial update of premiumForensics
+ * Accepts: TELEGRAM_ADMIN_TOKEN header OR x402-payment + x-admin-token (admin role)
+ * Rate limited: 20 updates per hour per admin token
+ */
+app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, async (req, res) => {
+  // ── Authorization ──────────────────────────────────────────────────────────
+  let authorized = false;
+
+  // Option 1: Telegram admin token
+  const telegramAdminToken = req.headers['x-telegram-admin-token'];
+  const validTelegramToken = process.env.TELEGRAM_ADMIN_TOKEN;
+  if (telegramAdminToken && validTelegramToken) {
+    try {
+      const aBuf = Buffer.from(telegramAdminToken);
+      const bBuf = Buffer.from(validTelegramToken);
+      if (aBuf.length === bBuf.length && crypto.timingSafeEqual(aBuf, bBuf)) {
+        authorized = true;
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Option 2: Valid x402 payment header AND valid admin token (admin role check)
+  if (!authorized) {
+    const x402Payment = req.headers['x402-payment'];
+    const validX402 = process.env.X402_PAYMENT_SECRET;
+    const adminToken = req.headers['x-admin-token'];
+    const validAdminSecret = process.env.ADMIN_SECRET;
+
+    if (x402Payment && validX402 && adminToken && validAdminSecret) {
+      try {
+        const paidBuf = Buffer.from(x402Payment);
+        const validPaidBuf = Buffer.from(validX402);
+        const adminBuf = Buffer.from(adminToken);
+        const validAdminBuf = Buffer.from(validAdminSecret);
+        const x402Valid = paidBuf.length === validPaidBuf.length &&
+          crypto.timingSafeEqual(paidBuf, validPaidBuf);
+        const adminValid = adminBuf.length === validAdminBuf.length &&
+          crypto.timingSafeEqual(adminBuf, validAdminBuf);
+        if (x402Valid && adminValid) authorized = true;
+      } catch { /* fall through */ }
+    }
+  }
+
+  if (!authorized) {
+    return res.status(403).json({ success: false, message: 'Forbidden' });
+  }
+
+  // ── Destructure only the 6 allowed premiumForensics fields ─────────────────
+  const {
+    addLiquidityValue,
+    removeLiquidityValue,
+    walletFunding,
+    tokensCreated,
+    forensicNotes,
+    crossProjectLinks
+  } = req.body;
+
+  // ── Validation ─────────────────────────────────────────────────────────────
+  const errors = [];
+
+  if (addLiquidityValue !== undefined) {
+    if (typeof addLiquidityValue !== 'string' || !LIQUIDITY_VALUE_REGEX.test(addLiquidityValue)) {
+      errors.push('addLiquidityValue must match /^\\d+(\\.\\d+)?\\s*(SOL|USDC|USD)?$/i');
+    }
+  }
+
+  if (removeLiquidityValue !== undefined) {
+    if (typeof removeLiquidityValue !== 'string' || !LIQUIDITY_VALUE_REGEX.test(removeLiquidityValue)) {
+      errors.push('removeLiquidityValue must match /^\\d+(\\.\\d+)?\\s*(SOL|USDC|USD)?$/i');
+    }
+  }
+
+  if (walletFunding !== undefined) {
+    if (
+      typeof walletFunding !== 'string' ||
+      walletFunding.length > 200 ||
+      HTML_TAG_REGEX.test(walletFunding)
+    ) {
+      errors.push('walletFunding must be a string, max 200 chars, with no HTML tags');
+    }
+  }
+
+  if (tokensCreated !== undefined) {
+    if (
+      !Array.isArray(tokensCreated) ||
+      !tokensCreated.every(addr => typeof addr === 'string' && WALLET_ADDRESS_REGEX.test(addr))
+    ) {
+      errors.push('tokensCreated must be an array of valid Solana Base58 addresses (32–44 chars)');
+    }
+  }
+
+  if (forensicNotes !== undefined) {
+    if (typeof forensicNotes !== 'string') {
+      errors.push('forensicNotes must be a string');
+    }
+  }
+
+  if (crossProjectLinks !== undefined) {
+    if (
+      !Array.isArray(crossProjectLinks) ||
+      !crossProjectLinks.every(addr => typeof addr === 'string' && WALLET_ADDRESS_REGEX.test(addr))
+    ) {
+      errors.push('crossProjectLinks must be an array of valid Solana Base58 addresses (32–44 chars)');
+    }
+  }
+
+  if (errors.length > 0) {
+    return res.status(400).json({ success: false, message: 'Validation failed', errors });
+  }
+
+  // ── Persist update ─────────────────────────────────────────────────────────
+  try {
+    const wallet = await Wallet.findOne({ walletAddress: req.params.address });
+    if (!wallet) return res.status(404).json({ success: false, message: 'Not found' });
+
+    const fieldsChanged = [];
+    const update = { updatedAt: new Date() };
+
+    if (addLiquidityValue !== undefined)   { update.addLiquidityValue   = addLiquidityValue;   fieldsChanged.push('addLiquidityValue'); }
+    if (removeLiquidityValue !== undefined) { update.removeLiquidityValue = removeLiquidityValue; fieldsChanged.push('removeLiquidityValue'); }
+    if (walletFunding !== undefined)        { update.walletFunding        = walletFunding;        fieldsChanged.push('walletFunding'); }
+    if (tokensCreated !== undefined)        { update.tokensCreated        = tokensCreated;        fieldsChanged.push('tokensCreated'); }
+    if (forensicNotes !== undefined)        { update.forensicNotes        = forensicNotes;        fieldsChanged.push('forensicNotes'); }
+    if (crossProjectLinks !== undefined)    { update.crossProjectLinks    = crossProjectLinks;    fieldsChanged.push('crossProjectLinks'); }
+
+    wallet.set('premiumForensics', Object.assign(
+      wallet.premiumForensics ? wallet.premiumForensics.toObject() : {},
+      update
+    ));
+    await wallet.save();
+
+    const auditEntry = {
+      updatedBy: 'admin',
+      timestamp: new Date().toISOString(),
+      fieldsChanged,
+      walletAddress: req.params.address
+    };
+    writeAdminAuditLog(auditEntry);
+
+    return res.json({
+      success: true,
+      premiumForensics: wallet.premiumForensics,
+      auditLog: {
+        updatedBy: auditEntry.updatedBy,
+        timestamp: auditEntry.timestamp,
+        fieldsChanged: auditEntry.fieldsChanged
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
