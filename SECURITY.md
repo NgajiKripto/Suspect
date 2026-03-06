@@ -256,3 +256,71 @@ Before deploying any new feature, ensure:
 
 If you discover a security vulnerability, please contact the team privately before public disclosure.
 Do not open a GitHub issue for security bugs.
+
+---
+
+## 10. Pre-Deploy Security Checklist
+
+Use this table before every production release to verify that no security controls have been accidentally removed or degraded.
+
+### 10.1 Content Security Policy
+
+| Check | Expectation | Verify |
+|-------|-------------|--------|
+| `script-src` does not allow `'unsafe-eval'` | `'unsafe-eval'` absent from CSP | `grep -c "unsafe-eval" frontend/index.html` → `0` |
+| `connect-src` does NOT include `http://localhost:*` | Localhost removed from production CSP | `grep -c "localhost" frontend/index.html` → `0` |
+| `frame-src` is `'none'` | No iframes allowed | CSP meta tag contains `frame-src 'none'` |
+| `object-src` is `'none'` | Plugins blocked | CSP meta tag contains `object-src 'none'` |
+| `base-uri` is `'self'` | Base-tag injection prevented | CSP meta tag contains `base-uri 'self'` |
+| `form-action` is `'self'` | Cross-origin form submission blocked | CSP meta tag contains `form-action 'self'` |
+| `upgrade-insecure-requests` present | HTTP sub-resources upgraded to HTTPS | CSP meta tag contains `upgrade-insecure-requests` |
+| Nonce migration comment present | Nonce-based path documented | Comment block retained in `<head>` |
+
+### 10.2 External Resources
+
+| Check | Expectation | Verify |
+|-------|-------------|--------|
+| Font Awesome CDN link has `integrity` (SRI) | `sha512-…` hash present | `grep -c 'integrity="sha512-' frontend/index.html` → `≥ 1` |
+| Font Awesome CDN link has `crossorigin="anonymous"` | CORS mode set for SRI | Present on the `<link>` tag |
+| Font Awesome CDN link has `referrerpolicy="no-referrer"` | No Referrer sent to cdnjs | Present on the `<link>` tag |
+| All external `<img>` tags have `referrerpolicy="no-referrer"` | Prevents Referrer leakage to third-party image hosts | `npm test -- --testNamePattern="external.*img"` passes |
+| All external `<a href="https://…">` have `rel="noopener noreferrer"` | Opener isolation + no Referrer sent | `npm test -- --testNamePattern="footer.*rel"` passes |
+| All `target="_blank"` links have `rel="noopener noreferrer"` | Opener isolation for new-tab links | `npm test` suite 5 passes |
+
+### 10.3 Input Handling & XSS
+
+| Check | Expectation | Verify |
+|-------|-------------|--------|
+| `escapeHtml()` encodes all five HTML specials | `&`, `<`, `>`, `"`, `'` all encoded | `npm test` suite 1 passes (11 tests) |
+| `createWalletRow()` escapes all API fields | No raw user data in innerHTML | `npm test` suite 2 passes (9 tests) |
+| `txHash` validated by Base58 regex before use in URL | Non-Base58 / XSS payloads rejected | `npm test` suite 4 passes (11 tests) |
+| `safeInnerHtml()` strips disallowed tags | Script/style/template removed | `npm test` suite 9 passes |
+| `safeInnerHtml()` strips dangerous href schemes | `javascript:`, `data:`, `vbscript:` all blocked | `npm test` suite 9 passes |
+| `safeInnerHtml()` enforces `rel="noopener noreferrer"` on absolute anchors | Even developer-authored links are hardened | `npm test` suite 9 passes |
+| `document.write` is absent | Not present anywhere in source | `grep -c "document.write" frontend/index.html` → `0` |
+
+### 10.4 Data Privacy
+
+| Check | Expectation | Verify |
+|-------|-------------|--------|
+| `reporterContact` not in POST payload | PII excluded from API call | `npm test` suite 3 passes |
+| `console.error` calls do not log user-supplied PII | Only `error.message` / `error` objects logged | Manual code review of console calls |
+| No wallet addresses or tokens logged to console | On-chain data not sent to third-party log aggregators | Manual code review |
+
+### 10.5 Referrer Policy
+
+| Check | Expectation | Verify |
+|-------|-------------|--------|
+| `<meta name="referrer">` present in `<head>` | Document-level Referrer-Policy set | `grep -c 'name="referrer"' frontend/index.html` → `1` |
+| Referrer-Policy value is `strict-origin-when-cross-origin` | Full URL not leaked cross-origin | `npm test` suite 7 passes |
+
+### 10.6 Accessibility (Security Features)
+
+| Check | Expectation | Verify |
+|-------|-------------|--------|
+| Skip-to-content link present | Keyboard navigation not blocked by security overlays | `<a class="skip-to-content">` in HTML |
+| Form error messages use `role="alert"` | Screen readers announce validation errors immediately | `formMessage` role set to `alert` for errors |
+| Form success messages use `role="status"` | Screen readers announce success politely | `formMessage` role set to `status` for success |
+| Wallet status announcer uses `aria-live="polite"` | Auto-refresh status announced to screen readers | `#wallet-status-announce` element present |
+| All interactive elements have visible focus rings | Keyboard users can see focus position | Manual visual check in both light and dark modes |
+| Theme toggle buttons have dynamic `aria-label` | Label reflects current mode (`Switch to dark/light mode`) | Manual test with screen reader |

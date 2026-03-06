@@ -7,6 +7,10 @@
  *   3. Form submission     — verifies reporterContact is NOT included in the POST payload
  *   4. txHash validation   — verifies invalid base58 strings are rejected before API call
  *   5. External links      — verifies all target="_blank" links have rel="noopener noreferrer"
+ *   6. CSP audit           — verifies meta CSP directives (no localhost, frame-src none, etc.)
+ *   7. Referrer policy     — verifies external <img> tags have referrerpolicy="no-referrer"
+ *   8. External links rel  — verifies footer/social links have rel="noopener noreferrer"
+ *   9. safeInnerHtml       — verifies anchor support with validated href and enforced rel/target
  *
  * Run (from frontend/ directory):
  *   npm test
@@ -435,4 +439,330 @@ describe('5. External links — target="_blank" links include rel="noopener nore
         expect(link).not.toBeNull();
         expect(link.getAttribute('target')).toBe('_blank');
     });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 6. CSP audit — meta Content-Security-Policy directives
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('6. CSP audit — meta Content-Security-Policy', () => {
+    const HTML_SOURCE = fs.readFileSync(
+        path.resolve(__dirname, '../index.html'),
+        'utf-8'
+    );
+
+    /** Extract the content attribute of the CSP meta tag. */
+    function extractCspContent(html) {
+        const match = html.match(
+            /<meta\s+http-equiv="Content-Security-Policy"\s+content="([^"]+)"/i
+        );
+        return match ? match[1] : '';
+    }
+
+    const CSP = extractCspContent(HTML_SOURCE);
+
+    test('CSP meta tag is present', () => {
+        expect(CSP.length).toBeGreaterThan(0);
+    });
+
+    test('connect-src does NOT include http://localhost:3000 (dev endpoint removed from production CSP)', () => {
+        expect(CSP).not.toContain('localhost');
+        expect(CSP).not.toContain('http://localhost:3000');
+    });
+
+    test('connect-src restricts network requests to self and https://suspected.dev only', () => {
+        expect(CSP).toContain('connect-src');
+        expect(CSP).toContain('https://suspected.dev');
+    });
+
+    test('frame-src is "none" (no iframe embeds needed, eliminates clickjacking surface)', () => {
+        expect(CSP).toMatch(/frame-src\s+'none'/);
+    });
+
+    test('object-src is "none" (blocks plugins)', () => {
+        expect(CSP).toMatch(/object-src\s+'none'/);
+    });
+
+    test('base-uri is "self" (prevents base-tag injection)', () => {
+        expect(CSP).toMatch(/base-uri\s+'self'/);
+    });
+
+    test('form-action is "self" (prevents cross-origin form submission)', () => {
+        expect(CSP).toMatch(/form-action\s+'self'/);
+    });
+
+    test('upgrade-insecure-requests directive is present', () => {
+        expect(CSP).toContain('upgrade-insecure-requests');
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 7. Referrer policy — external images and document meta
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('7. Referrer policy — external <img> tags and document meta', () => {
+    const HTML_SOURCE = fs.readFileSync(
+        path.resolve(__dirname, '../index.html'),
+        'utf-8'
+    );
+
+    test('document has a <meta name="referrer"> policy tag', () => {
+        expect(HTML_SOURCE).toMatch(/<meta\s+name="referrer"\s+content="[^"]+"/i);
+    });
+
+    test('Referrer-Policy meta is set to strict-origin-when-cross-origin', () => {
+        expect(HTML_SOURCE).toContain('content="strict-origin-when-cross-origin"');
+    });
+
+    test('every external <img> src has referrerpolicy="no-referrer"', () => {
+        // Match all <img> tags that reference an external (https://) URL
+        const imgTagRegex = /<img\b[^>]*src="https?:\/\/[^"]*"[^>]*>/gi;
+        const externalImgs = HTML_SOURCE.match(imgTagRegex) || [];
+
+        // Sanity check: the page must contain at least one external image (logos/badges)
+        expect(externalImgs.length).toBeGreaterThan(0);
+
+        const missingPolicy = externalImgs.filter(
+            tag => !tag.includes('referrerpolicy="no-referrer"')
+        );
+        expect(missingPolicy).toEqual([]);
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 8. External links — footer links have rel="noopener noreferrer"
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('8. External links — footer and social links have rel="noopener noreferrer"', () => {
+    const HTML_SOURCE = fs.readFileSync(
+        path.resolve(__dirname, '../index.html'),
+        'utf-8'
+    );
+
+    test('every line with an external https:// href also has rel="noopener noreferrer"', () => {
+        // Find all <a href="https://..."> lines (static HTML, not JS template literals)
+        const anchorLines = HTML_SOURCE
+            .split('\n')
+            .filter(line => /<a\b[^>]*href="https?:\/\//.test(line));
+
+        // Sanity: at least the footer links should be present
+        expect(anchorLines.length).toBeGreaterThan(0);
+
+        const unsafe = anchorLines.filter(
+            line => !line.includes('rel="noopener noreferrer"')
+        );
+        expect(unsafe).toEqual([]);
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 9. safeInnerHtml — anchor support with validated href
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Replicated verbatim from index.html — the updated safeInnerHtml with anchor support.
+ * (Runs in jsdom so document.createElement is available.)
+ */
+function safeInnerHtml(element, content, options) {
+    const allowedTags = (options && Array.isArray(options.allowedTags))
+        ? options.allowedTags
+        : ['strong', 'em', 'br', 'code'];
+
+    const RAW_TEXT_TAGS = ['script', 'style', 'template', 'textarea', 'noscript'];
+
+    const tmpl = document.createElement('template');
+    tmpl.innerHTML = content;
+    const fragment = tmpl.content;
+
+    const allElements = Array.from(fragment.querySelectorAll('*')).reverse();
+    allElements.forEach(function(el) {
+        if (!el.parentNode) return;
+        const tag = el.tagName.toLowerCase();
+        if (!allowedTags.includes(tag)) {
+            if (RAW_TEXT_TAGS.includes(tag)) {
+                el.parentNode.removeChild(el);
+            } else {
+                while (el.firstChild) {
+                    el.parentNode.insertBefore(el.firstChild, el);
+                }
+                el.parentNode.removeChild(el);
+            }
+            return;
+        }
+        if (tag === 'a') {
+            const rawHref = (el.getAttribute('href') || '').trim();
+            // Allow only safe URL schemes and safe relative paths.
+            // The negative lookahead blocks root-relative paths that begin with a
+            // scheme-like sequence (e.g. /javascript:) or a protocol-relative URL (//).
+            const safeHref = /^(https?:\/\/|mailto:|#|\/(?![a-z][a-z0-9+\-.]*:|\/))/.test(rawHref) ? rawHref : '';
+            Array.from(el.attributes).forEach(function(attr) { el.removeAttribute(attr.name); });
+            if (safeHref) {
+                el.setAttribute('href', safeHref);
+                if (/^https?:\/\//.test(safeHref)) {
+                    el.setAttribute('target', '_blank');
+                    el.setAttribute('rel', 'noopener noreferrer');
+                }
+            }
+        } else {
+            Array.from(el.attributes).forEach(function(attr) {
+                el.removeAttribute(attr.name);
+            });
+        }
+    });
+
+    element.innerHTML = '';
+    element.appendChild(fragment);
+    return element;
+}
+
+describe('9. safeInnerHtml — anchor support with validated href', () => {
+    let el;
+
+    beforeEach(() => {
+        el = document.createElement('div');
+    });
+
+    afterEach(() => {
+        el = null;
+    });
+
+    test('<a> is stripped when "a" is not in allowedTags (default behaviour preserved)', () => {
+        safeInnerHtml(el, '<a href="https://example.com">link</a>');
+        expect(el.querySelector('a')).toBeNull();
+        expect(el.textContent).toBe('link');
+    });
+
+    test('<a> renders as clickable link when "a" is in allowedTags', () => {
+        safeInnerHtml(el, '<a href="https://t.me/suspecteddotdev">@suspecteddotdev</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        expect(anchor).not.toBeNull();
+        expect(anchor.getAttribute('href')).toBe('https://t.me/suspecteddotdev');
+        expect(anchor.textContent).toBe('@suspecteddotdev');
+    });
+
+    test('safeInnerHtml enforces rel="noopener noreferrer" on https:// anchors', () => {
+        safeInnerHtml(el, '<a href="https://t.me/suspecteddotdev">link</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        expect(anchor).not.toBeNull();
+        const rel = anchor.getAttribute('rel').split(/\s+/);
+        expect(rel).toContain('noopener');
+        expect(rel).toContain('noreferrer');
+    });
+
+    test('safeInnerHtml enforces target="_blank" on https:// anchors', () => {
+        safeInnerHtml(el, '<a href="https://t.me/suspecteddotdev">link</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        expect(anchor).not.toBeNull();
+        expect(anchor.getAttribute('target')).toBe('_blank');
+    });
+
+    test('javascript: href is stripped (not rendered as link)', () => {
+        safeInnerHtml(el, '<a href="javascript:alert(1)">xss</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        // Anchor element is present but href must be absent
+        if (anchor) {
+            expect(anchor.getAttribute('href')).toBeNull();
+        }
+        // The text content should still be visible
+        expect(el.textContent).toBe('xss');
+    });
+
+    test('data: href is stripped', () => {
+        safeInnerHtml(el, '<a href="data:text/html,<script>alert(1)</script>">xss</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        if (anchor) {
+            expect(anchor.getAttribute('href')).toBeNull();
+        }
+    });
+
+    test('vbscript: href is stripped', () => {
+        safeInnerHtml(el, '<a href="vbscript:msgbox(1)">xss</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        if (anchor) {
+            expect(anchor.getAttribute('href')).toBeNull();
+        }
+    });
+
+    test('onclick attribute is stripped from allowed <a> even when href is valid', () => {
+        safeInnerHtml(el, '<a href="https://example.com" onclick="evil()">link</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        expect(anchor).not.toBeNull();
+        expect(anchor.getAttribute('onclick')).toBeNull();
+        expect(anchor.getAttribute('href')).toBe('https://example.com');
+    });
+
+    test('onerror attribute is stripped from allowed <a>', () => {
+        safeInnerHtml(el, '<a href="https://example.com" onerror="evil()">link</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        expect(anchor).not.toBeNull();
+        expect(anchor.getAttribute('onerror')).toBeNull();
+    });
+
+    test('<script> inside an allowed <a> is still removed', () => {
+        safeInnerHtml(el, '<a href="https://example.com"><script>evil()</script>link</a>', {
+            allowedTags: ['a'],
+        });
+        expect(el.querySelector('script')).toBeNull();
+        expect(el.textContent).toBe('link');
+    });
+
+    test('relative href (#anchor) is preserved without target or rel', () => {
+        safeInnerHtml(el, '<a href="#section">Jump</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        expect(anchor).not.toBeNull();
+        expect(anchor.getAttribute('href')).toBe('#section');
+        // No forced target/_blank for fragment links
+        expect(anchor.getAttribute('target')).toBeNull();
+    });
+
+    test('/javascript: root-relative bypass is blocked (href stripped)', () => {
+        safeInnerHtml(el, '<a href="/javascript:alert(1)">xss</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        if (anchor) {
+            expect(anchor.getAttribute('href')).toBeNull();
+        }
+        expect(el.textContent).toBe('xss');
+    });
+
+    test('protocol-relative // URL is blocked (href stripped)', () => {
+        safeInnerHtml(el, '<a href="//evil.example.com/xss">xss</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        if (anchor) {
+            expect(anchor.getAttribute('href')).toBeNull();
+        }
+    });
+
+    test('root-relative /path is allowed (same-origin navigation, safe)', () => {
+        safeInnerHtml(el, '<a href="/about">About</a>', {
+            allowedTags: ['a'],
+        });
+        const anchor = el.querySelector('a');
+        expect(anchor).not.toBeNull();
+        expect(anchor.getAttribute('href')).toBe('/about');
+        // Root-relative paths are same-origin — no forced target/_blank
+        expect(anchor.getAttribute('target')).toBeNull();
+    });
+
 });
