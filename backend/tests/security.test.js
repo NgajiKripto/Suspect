@@ -22,9 +22,11 @@ const request = require('supertest');
 // ─── Shared regex (mirrors server.js) ────────────────────────────────────────
 const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const TX_HASH_REGEX = /^[1-9A-HJ-NP-Za-km-z]{1,100}$/;
+const LIQUIDITY_VALUE_REGEX = /^\d+(\.\d+)?\s*(SOL|USDC|USD)?$/i;
+const HTML_TAG_REGEX = /<[^>]*>/;
 
 // ─── Build a lightweight test app that mimics server.js validation ───────────
-function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecret = 'admin-secret' } = {}) {
+function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecret = 'admin-secret', telegramAdminToken = 'tg-admin-token', patchAdminMax = 20 } = {}) {
   const app = express();
   app.use(helmet());
   app.use(express.json());
@@ -39,6 +41,19 @@ function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecre
     standardHeaders: false,
     legacyHeaders: false,
     message: { success: false, message: 'Too many reports submitted. Please try again later.' }
+  });
+
+  // Rate limit for PATCH admin premium endpoint (mirrors production, keyed by token hash)
+  const adminPremiumRateLimit = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: patchAdminMax,
+    standardHeaders: false,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+      const token = req.headers['x-telegram-admin-token'] || req.headers['x402-payment'] || req.ip;
+      return crypto.createHash('sha256').update(String(token)).digest('hex');
+    },
+    message: { success: false, message: 'Rate limit exceeded. Max 20 updates per hour per admin token.' }
   });
 
   // Public list — no forensic data
@@ -101,6 +116,81 @@ function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecre
     res.json({ success: true, premiumForensics: { addLiquidityValue, removeLiquidityValue, walletFunding, tokensCreated, forensicNotes, crossProjectLinks, updatedAt: new Date().toISOString() } });
   });
 
+  // PATCH admin endpoint — partial update of premiumForensics (mirrors production)
+  app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, (req, res) => {
+    // Option 1: Telegram admin token
+    let authorized = false;
+    const tgToken = req.headers['x-telegram-admin-token'];
+    if (tgToken && telegramAdminToken) {
+      try {
+        const aBuf = Buffer.from(tgToken);
+        const bBuf = Buffer.from(telegramAdminToken);
+        if (aBuf.length === bBuf.length && crypto.timingSafeEqual(aBuf, bBuf)) authorized = true;
+      } catch { /* fall through */ }
+    }
+    // Option 2: x402-payment + x-admin-token (admin role)
+    if (!authorized) {
+      const x402 = req.headers['x402-payment'];
+      const admin = req.headers['x-admin-token'];
+      if (x402 && paymentSecret && admin && adminSecret) {
+        try {
+          const paidBuf = Buffer.from(x402);
+          const validPaidBuf = Buffer.from(paymentSecret);
+          const adminBuf = Buffer.from(admin);
+          const validAdminBuf = Buffer.from(adminSecret);
+          const x402Valid = paidBuf.length === validPaidBuf.length && crypto.timingSafeEqual(paidBuf, validPaidBuf);
+          const adminValid = adminBuf.length === validAdminBuf.length && crypto.timingSafeEqual(adminBuf, validAdminBuf);
+          if (x402Valid && adminValid) authorized = true;
+        } catch { /* fall through */ }
+      }
+    }
+    if (!authorized) return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    const { addLiquidityValue, removeLiquidityValue, walletFunding, tokensCreated, forensicNotes, crossProjectLinks } = req.body;
+
+    // Validation
+    const errors = [];
+    if (addLiquidityValue !== undefined) {
+      if (typeof addLiquidityValue !== 'string' || !LIQUIDITY_VALUE_REGEX.test(addLiquidityValue))
+        errors.push('addLiquidityValue must match /^\\d+(\\.\\d+)?\\s*(SOL|USDC|USD)?$/i');
+    }
+    if (removeLiquidityValue !== undefined) {
+      if (typeof removeLiquidityValue !== 'string' || !LIQUIDITY_VALUE_REGEX.test(removeLiquidityValue))
+        errors.push('removeLiquidityValue must match /^\\d+(\\.\\d+)?\\s*(SOL|USDC|USD)?$/i');
+    }
+    if (walletFunding !== undefined) {
+      if (typeof walletFunding !== 'string' || walletFunding.length > 200 || HTML_TAG_REGEX.test(walletFunding))
+        errors.push('walletFunding must be a string, max 200 chars, with no HTML tags');
+    }
+    if (tokensCreated !== undefined) {
+      if (!Array.isArray(tokensCreated) || !tokensCreated.every(a => typeof a === 'string' && WALLET_ADDRESS_REGEX.test(a)))
+        errors.push('tokensCreated must be an array of valid Solana Base58 addresses (32–44 chars)');
+    }
+    if (forensicNotes !== undefined) {
+      if (typeof forensicNotes !== 'string') errors.push('forensicNotes must be a string');
+    }
+    if (crossProjectLinks !== undefined) {
+      if (!Array.isArray(crossProjectLinks) || !crossProjectLinks.every(a => typeof a === 'string' && WALLET_ADDRESS_REGEX.test(a)))
+        errors.push('crossProjectLinks must be an array of valid Solana Base58 addresses (32–44 chars)');
+    }
+    if (errors.length > 0) return res.status(400).json({ success: false, message: 'Validation failed', errors });
+
+    const fieldsChanged = [
+      addLiquidityValue !== undefined   ? 'addLiquidityValue'   : null,
+      removeLiquidityValue !== undefined ? 'removeLiquidityValue' : null,
+      walletFunding !== undefined        ? 'walletFunding'        : null,
+      tokensCreated !== undefined        ? 'tokensCreated'        : null,
+      forensicNotes !== undefined        ? 'forensicNotes'        : null,
+      crossProjectLinks !== undefined    ? 'crossProjectLinks'    : null
+    ].filter(Boolean);
+
+    res.json({
+      success: true,
+      premiumForensics: { addLiquidityValue, removeLiquidityValue, walletFunding, tokensCreated, forensicNotes, crossProjectLinks, updatedAt: new Date().toISOString() },
+      auditLog: { updatedBy: 'admin', timestamp: new Date().toISOString(), fieldsChanged }
+    });
+  });
+
   // Submit report — with strict rate limit
   app.post('/api/wallets', submitRateLimit, (req, res) => {
     const { walletAddress, evidence, tokenAddress } = req.body;
@@ -138,6 +228,7 @@ function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecre
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const VALID_ADDRESS = 'So11111111111111111111111111111111111111112'; // 44 chars, valid Base58
 const VALID_TX = 'ZeKaYDCPcCRFY9jHV4qHikWb3d6z4xB9SuKH1j6U2vxf'; // valid Base58
+const VALID_TOKEN_ADDR = 'TokenAddr1111111111111111111111111111111111'; // 44 chars, valid Base58
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -442,5 +533,279 @@ describe('9. Admin Endpoint — POST /api/admin/wallets/:address/premium-forensi
       .set('x-admin-token', '')
       .send(premiumPayload);
     expect(res.status).toBe(403);
+  });
+});
+
+describe('10. PATCH /api/admin/wallets/:address/premium — Authorization', () => {
+  const tgToken = 'tg-admin-secret-xyz';
+  const adminSec = 'admin-secret-xyz';
+  const paySecret = 'pay-secret-xyz';
+  const app = buildTestApp({ telegramAdminToken: tgToken, adminSecret: adminSec, paymentSecret: paySecret });
+
+  const validPayload = { addLiquidityValue: '10 SOL', walletFunding: 'Binance' };
+
+  test('returns 403 with no credentials', async () => {
+    const res = await request(app).patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`).send(validPayload);
+    expect(res.status).toBe(403);
+  });
+
+  test('returns 403 with wrong telegram admin token', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set('x-telegram-admin-token', 'wrong-token')
+      .send(validPayload);
+    expect(res.status).toBe(403);
+  });
+
+  test('returns 200 with valid telegram admin token', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set('x-telegram-admin-token', tgToken)
+      .send(validPayload);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+  });
+
+  test('returns 200 with valid x402-payment + x-admin-token', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set('x402-payment', paySecret)
+      .set('x-admin-token', adminSec)
+      .send(validPayload);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+  });
+
+  test('returns 403 with x402-payment only (missing admin role)', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set('x402-payment', paySecret)
+      .send(validPayload);
+    expect(res.status).toBe(403);
+  });
+
+  test('returns 403 with x-admin-token only (missing x402 payment)', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set('x-admin-token', adminSec)
+      .send(validPayload);
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('11. PATCH /api/admin/wallets/:address/premium — Validation', () => {
+  const tgToken = 'tg-admin-valid-token';
+  const app = buildTestApp({ telegramAdminToken: tgToken });
+  const auth = { 'x-telegram-admin-token': tgToken };
+
+  test('accepts valid partial update (addLiquidityValue only)', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ addLiquidityValue: '45.2 SOL' });
+    expect(res.status).toBe(200);
+    expect(res.body.premiumForensics).toHaveProperty('addLiquidityValue', '45.2 SOL');
+  });
+
+  test('accepts addLiquidityValue without currency unit', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ addLiquidityValue: '100' });
+    expect(res.status).toBe(200);
+  });
+
+  test('accepts addLiquidityValue with USDC', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ addLiquidityValue: '50.5 USDC' });
+    expect(res.status).toBe(200);
+  });
+
+  test('rejects addLiquidityValue with letters before number', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ addLiquidityValue: 'abc SOL' });
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(expect.arrayContaining([expect.stringMatching(/addLiquidityValue/)]));
+  });
+
+  test('rejects removeLiquidityValue with invalid format', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ removeLiquidityValue: '<script>' });
+    expect(res.status).toBe(400);
+  });
+
+  test('accepts walletFunding under 200 chars with no HTML', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ walletFunding: 'Binance Hot Wallet' });
+    expect(res.status).toBe(200);
+  });
+
+  test('rejects walletFunding with HTML tags', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ walletFunding: '<script>alert(1)</script>' });
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(expect.arrayContaining([expect.stringMatching(/walletFunding/)]));
+  });
+
+  test('rejects walletFunding exceeding 200 chars', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ walletFunding: 'A'.repeat(201) });
+    expect(res.status).toBe(400);
+  });
+
+  test('accepts tokensCreated as array of valid Base58 addresses', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ tokensCreated: [VALID_TOKEN_ADDR] });
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.premiumForensics.tokensCreated)).toBe(true);
+  });
+
+  test('rejects tokensCreated with invalid Base58 address', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ tokensCreated: ['not-valid-0OIl'] });
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(expect.arrayContaining([expect.stringMatching(/tokensCreated/)]));
+  });
+
+  test('rejects tokensCreated as non-array', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ tokensCreated: 'not-an-array' });
+    expect(res.status).toBe(400);
+  });
+
+  test('accepts crossProjectLinks as array of valid Base58 addresses', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ crossProjectLinks: [VALID_TOKEN_ADDR] });
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.premiumForensics.crossProjectLinks)).toBe(true);
+  });
+
+  test('rejects crossProjectLinks with invalid address', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ crossProjectLinks: ['<bad>'] });
+    expect(res.status).toBe(400);
+  });
+
+  test('accepts forensicNotes as a string', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ forensicNotes: 'Repeat offender pattern detected' });
+    expect(res.status).toBe(200);
+    expect(res.body.premiumForensics).toHaveProperty('forensicNotes', 'Repeat offender pattern detected');
+  });
+
+  test('rejects forensicNotes as non-string', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ forensicNotes: 12345 });
+    expect(res.status).toBe(400);
+  });
+
+  test('returns multiple validation errors when multiple fields are invalid', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ addLiquidityValue: 'bad', walletFunding: '<b>html</b>' });
+    expect(res.status).toBe(400);
+    expect(res.body.errors.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('12. PATCH /api/admin/wallets/:address/premium — Response Shape & Audit Log', () => {
+  const tgToken = 'tg-admin-audit-token';
+  const app = buildTestApp({ telegramAdminToken: tgToken });
+  const auth = { 'x-telegram-admin-token': tgToken };
+
+  test('response includes premiumForensics and auditLog', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ addLiquidityValue: '10 SOL', forensicNotes: 'test note' });
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('premiumForensics');
+    expect(res.body).toHaveProperty('auditLog');
+  });
+
+  test('auditLog contains updatedBy, timestamp, and fieldsChanged', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ addLiquidityValue: '10 SOL', walletFunding: 'Binance' });
+    expect(res.status).toBe(200);
+    expect(res.body.auditLog).toHaveProperty('updatedBy', 'admin');
+    expect(res.body.auditLog).toHaveProperty('timestamp');
+    expect(Array.isArray(res.body.auditLog.fieldsChanged)).toBe(true);
+  });
+
+  test('auditLog.fieldsChanged reflects only submitted fields', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ forensicNotes: 'only this field' });
+    expect(res.status).toBe(200);
+    expect(res.body.auditLog.fieldsChanged).toEqual(['forensicNotes']);
+  });
+
+  test('auditLog.fieldsChanged lists all fields when all are submitted', async () => {
+    const res = await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({
+        addLiquidityValue: '10 SOL',
+        removeLiquidityValue: '1 SOL',
+        walletFunding: 'Binance',
+        tokensCreated: [VALID_TOKEN_ADDR],
+        forensicNotes: 'note',
+        crossProjectLinks: [VALID_TOKEN_ADDR]
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.auditLog.fieldsChanged).toEqual(
+      expect.arrayContaining(['addLiquidityValue', 'removeLiquidityValue', 'walletFunding', 'tokensCreated', 'forensicNotes', 'crossProjectLinks'])
+    );
+  });
+});
+
+describe('13. PATCH /api/admin/wallets/:address/premium — Rate Limiting', () => {
+  const tgToken = 'tg-ratelimit-token';
+  // Low cap to make the test fast
+  const app = buildTestApp({ telegramAdminToken: tgToken, patchAdminMax: 3 });
+  const auth = { 'x-telegram-admin-token': tgToken };
+
+  test('blocks requests after per-token rate limit is exceeded', async () => {
+    const results = [];
+    for (let i = 0; i < 5; i++) {
+      const res = await request(app)
+        .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+        .set(auth)
+        .send({ forensicNotes: `update ${i}` });
+      results.push(res.status);
+    }
+    // First 3 should succeed (200), remaining should be rate-limited (429)
+    expect(results.slice(0, 3).every(s => s === 200)).toBe(true);
+    expect(results.slice(3).every(s => s === 429)).toBe(true);
   });
 });
