@@ -1143,8 +1143,8 @@ app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, requireA
   }
 
   if (forensicNotes !== undefined) {
-    if (typeof forensicNotes !== 'string') {
-      errors.push('forensicNotes must be a string');
+    if (typeof forensicNotes !== 'string' || HTML_TAG_REGEX.test(forensicNotes)) {
+      errors.push('forensicNotes must be a string with no HTML tags');
     }
   }
 

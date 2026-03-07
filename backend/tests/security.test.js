@@ -240,7 +240,8 @@ function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecre
         errors.push('tokensCreated must be an array of valid Solana Base58 addresses (32–44 chars)');
     }
     if (forensicNotes !== undefined) {
-      if (typeof forensicNotes !== 'string') errors.push('forensicNotes must be a string');
+      if (typeof forensicNotes !== 'string' || HTML_TAG_REGEX.test(forensicNotes))
+        errors.push('forensicNotes must be a string with no HTML tags');
     }
     if (crossProjectLinks !== undefined) {
       if (!Array.isArray(crossProjectLinks) || !crossProjectLinks.every(a => typeof a === 'string' && WALLET_ADDRESS_REGEX.test(a)))
