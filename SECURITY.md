@@ -324,3 +324,44 @@ Use this table before every production release to verify that no security contro
 | Wallet status announcer uses `aria-live="polite"` | Auto-refresh status announced to screen readers | `#wallet-status-announce` element present |
 | All interactive elements have visible focus rings | Keyboard users can see focus position | Manual visual check in both light and dark modes |
 | Theme toggle buttons have dynamic `aria-label` | Label reflects current mode (`Switch to dark/light mode`) | Manual test with screen reader |
+
+---
+
+## 11. 🔐 Premium Forensic Data Handling
+
+### Data Classification
+
+| Field | Sensitivity | Storage | Exposure |
+|-------|------------|---------|----------|
+| `addLiquidityValue` | Public (post-payment) | Encrypted at rest | API + x402 gate |
+| `removeLiquidityValue` | Public (post-payment) | Encrypted at rest | API + x402 gate |
+| `walletFunding` | Medium (source analysis) | Encrypted at rest | API + x402 gate |
+| `tokensCreated` | Public (on-chain) | Indexed, encrypted | API + x402 gate |
+| `forensicNotes` | Internal writes / Premium reads | Encrypted, access-logged | API + x402 gate* |
+| `crossProjectLinks` | Medium (investigative) | Encrypted at rest | API + x402 gate |
+
+*`forensicNotes` visible only to paying users, but content should avoid revealing investigative methods
+
+### Access Control Checklist
+
+- [ ] x402 payment validation uses `timingSafeEqual` + oracle price cache
+- [ ] Admin updates require dual auth: Telegram `chat.id` + `user.id` whitelist
+- [ ] All premium field updates logged to `admin_audit.log` with before/after diff
+- [ ] API responses never include `premiumForensics` without valid payment header
+- [ ] Frontend escapes all premium field values before DOM insertion
+
+### Admin Workflow (Telegram Bot)
+
+1. Receive report notification → click **[📝 Add Premium Data]**
+2. Enter structured text format (see `/premium_help`)
+3. Review parsed preview → confirm
+4. Changes logged + wallet status updated to `"verified_premium"`
+
+### Incident Response
+
+If premium data is leaked or tampered:
+
+1. Revoke x402 gateway API key immediately
+2. Rotate `TELEGRAM_BOT_TOKEN`
+3. Review `admin_audit.log` for suspicious updates
+4. Notify affected paying users via Twitter [@suspecteddotdev](https://twitter.com/suspecteddotdev)
