@@ -22,7 +22,12 @@ const {
   parsePremiumInput,
   validatePremiumFields,
   buildPremiumPreview,
-  PREMIUM_HELP_TEXT
+  PREMIUM_HELP_TEXT,
+  CAMEL_TO_KEY,
+  SENSITIVE_FIELDS,
+  buildEditCurrentValues,
+  buildDiffPreview,
+  buildBulkDiffPreview
 } = require('../botUtils');
 
 // ─── Shared regex (mirrors server.js) ────────────────────────────────────────
@@ -1400,5 +1405,212 @@ describe('20. Bot — PREMIUM_HELP_TEXT', () => {
 
   test('mentions /premium_help command', () => {
     expect(PREMIUM_HELP_TEXT).toContain('/premium_help');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 21. Bot — CAMEL_TO_KEY and SENSITIVE_FIELDS
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('21. Bot — CAMEL_TO_KEY and SENSITIVE_FIELDS', () => {
+  test('CAMEL_TO_KEY maps addLiquidityValue → ADD_LIQ', () => {
+    expect(CAMEL_TO_KEY.addLiquidityValue).toBe('ADD_LIQ');
+  });
+
+  test('CAMEL_TO_KEY maps removeLiquidityValue → REM_LIQ', () => {
+    expect(CAMEL_TO_KEY.removeLiquidityValue).toBe('REM_LIQ');
+  });
+
+  test('CAMEL_TO_KEY maps walletFunding → FUNDING', () => {
+    expect(CAMEL_TO_KEY.walletFunding).toBe('FUNDING');
+  });
+
+  test('CAMEL_TO_KEY maps tokensCreated → TOKENS', () => {
+    expect(CAMEL_TO_KEY.tokensCreated).toBe('TOKENS');
+  });
+
+  test('CAMEL_TO_KEY maps forensicNotes → NOTES', () => {
+    expect(CAMEL_TO_KEY.forensicNotes).toBe('NOTES');
+  });
+
+  test('CAMEL_TO_KEY maps crossProjectLinks → LINKS', () => {
+    expect(CAMEL_TO_KEY.crossProjectLinks).toBe('LINKS');
+  });
+
+  test('CAMEL_TO_KEY covers all six premium fields', () => {
+    expect(Object.keys(CAMEL_TO_KEY)).toHaveLength(6);
+  });
+
+  test('SENSITIVE_FIELDS includes walletFunding', () => {
+    expect(SENSITIVE_FIELDS.has('walletFunding')).toBe(true);
+  });
+
+  test('SENSITIVE_FIELDS includes crossProjectLinks', () => {
+    expect(SENSITIVE_FIELDS.has('crossProjectLinks')).toBe(true);
+  });
+
+  test('SENSITIVE_FIELDS does not include non-sensitive fields', () => {
+    expect(SENSITIVE_FIELDS.has('addLiquidityValue')).toBe(false);
+    expect(SENSITIVE_FIELDS.has('forensicNotes')).toBe(false);
+    expect(SENSITIVE_FIELDS.has('tokensCreated')).toBe(false);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 22. Bot — buildEditCurrentValues
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('22. Bot — buildEditCurrentValues', () => {
+  const WALLET = 'So11111111111111111111111111111111111111112';
+
+  test('includes the case number', () => {
+    expect(buildEditCurrentValues(42, WALLET, {})).toContain('Case #42');
+  });
+
+  test('includes the wallet address', () => {
+    expect(buildEditCurrentValues(1, WALLET, {})).toContain(WALLET);
+  });
+
+  test('shows "(not set)" for missing fields', () => {
+    const msg = buildEditCurrentValues(1, WALLET, {});
+    expect(msg).toContain('(not set)');
+  });
+
+  test('shows all six field labels', () => {
+    const msg = buildEditCurrentValues(1, WALLET, {});
+    expect(msg).toContain('ADD_LIQ');
+    expect(msg).toContain('REM_LIQ');
+    expect(msg).toContain('FUNDING');
+    expect(msg).toContain('TOKENS');
+    expect(msg).toContain('NOTES');
+    expect(msg).toContain('LINKS');
+  });
+
+  test('shows ✏️ edit indicator for each field', () => {
+    const msg = buildEditCurrentValues(1, WALLET, {});
+    // Should contain at least 6 ✏️ markers
+    expect((msg.match(/\[✏️\]/g) || []).length).toBeGreaterThanOrEqual(6);
+  });
+
+  test('shows current scalar field values', () => {
+    const data = { addLiquidityValue: '45.2 SOL', walletFunding: 'Binance Hot Wallet' };
+    const msg  = buildEditCurrentValues(5, WALLET, data);
+    expect(msg).toContain('45.2 SOL');
+    expect(msg).toContain('Binance Hot Wallet');
+  });
+
+  test('formats array values as comma-joined string', () => {
+    const data = { tokensCreated: ['addr1111111111111111111111111111', 'addr2222222222222222222222222222'] };
+    const msg  = buildEditCurrentValues(1, WALLET, data);
+    expect(msg).toContain('addr1111111111111111111111111111, addr2222222222222222222222222222');
+  });
+
+  test('includes instruction to send NEW_VALUES:', () => {
+    const msg = buildEditCurrentValues(1, WALLET, {});
+    expect(msg).toContain('NEW_VALUES:');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 23. Bot — buildDiffPreview
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('23. Bot — buildDiffPreview', () => {
+  test('includes the case number', () => {
+    expect(buildDiffPreview(7, 'FUNDING', 'CEX withdrawal', 'Mixer (Tornado)')).toContain('Case #7');
+  });
+
+  test('includes the field label', () => {
+    expect(buildDiffPreview(1, 'FUNDING', 'old', 'new')).toContain('FUNDING');
+  });
+
+  test('shows the old value with From: prefix', () => {
+    expect(buildDiffPreview(1, 'FUNDING', 'CEX withdrawal', 'Mixer')).toContain("From: 'CEX withdrawal'");
+  });
+
+  test('shows the new value with To: prefix', () => {
+    expect(buildDiffPreview(1, 'FUNDING', 'CEX withdrawal', 'Mixer')).toContain("To:   'Mixer'");
+  });
+
+  test('includes a confirmation prompt', () => {
+    expect(buildDiffPreview(1, 'FUNDING', 'old', 'new')).toMatch(/[Cc]onfirm/);
+  });
+
+  test('shows "(not set)" for undefined old value', () => {
+    expect(buildDiffPreview(1, 'FUNDING', undefined, 'Mixer')).toContain("From: '(not set)'");
+  });
+
+  test('does NOT include sensitive-field warning for non-sensitive field', () => {
+    const msg = buildDiffPreview(1, 'ADD_LIQ', '45 SOL', '50 SOL', false);
+    expect(msg).not.toContain('sensitive');
+  });
+
+  test('includes sensitive-field warning when isSensitive=true', () => {
+    const msg = buildDiffPreview(1, 'FUNDING', 'old', 'new', true);
+    expect(msg).toContain('sensitive');
+  });
+
+  test('formats array old value as comma-joined string', () => {
+    const oldVal = ['addr1111111111111111111111111111', 'addr2222222222222222222222222222'];
+    const msg    = buildDiffPreview(1, 'LINKS', oldVal, []);
+    expect(msg).toContain('addr1111111111111111111111111111, addr2222222222222222222222222222');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 24. Bot — buildBulkDiffPreview
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('24. Bot — buildBulkDiffPreview', () => {
+  const WALLET = 'So11111111111111111111111111111111111111112';
+
+  test('includes the case number', () => {
+    const msg = buildBulkDiffPreview(42, WALLET, {}, { walletFunding: 'Mixer' });
+    expect(msg).toContain('Case #42');
+  });
+
+  test('includes the wallet address', () => {
+    const msg = buildBulkDiffPreview(1, WALLET, {}, { walletFunding: 'Mixer' });
+    expect(msg).toContain(WALLET);
+  });
+
+  test('includes a confirmation prompt', () => {
+    const msg = buildBulkDiffPreview(1, WALLET, {}, { walletFunding: 'Mixer' });
+    expect(msg).toMatch(/[Cc]onfirm/);
+  });
+
+  test('lists changed field label and arrow', () => {
+    const msg = buildBulkDiffPreview(1, WALLET, { walletFunding: 'CEX' }, { walletFunding: 'Mixer' });
+    expect(msg).toContain('FUNDING');
+    expect(msg).toContain('→');
+  });
+
+  test('shows old value in the change line', () => {
+    const msg = buildBulkDiffPreview(1, WALLET, { walletFunding: 'CEX' }, { walletFunding: 'Mixer' });
+    expect(msg).toContain("'CEX'");
+    expect(msg).toContain("'Mixer'");
+  });
+
+  test('shows "(not set)" for missing old value', () => {
+    const msg = buildBulkDiffPreview(1, WALLET, {}, { walletFunding: 'Mixer' });
+    expect(msg).toContain("'(not set)'");
+  });
+
+  test('lists multiple changed fields', () => {
+    const newData = { addLiquidityValue: '50 SOL', walletFunding: 'Mixer' };
+    const msg     = buildBulkDiffPreview(1, WALLET, {}, newData);
+    expect(msg).toContain('ADD_LIQ');
+    expect(msg).toContain('FUNDING');
+  });
+
+  test('notes when no recognised fields are provided', () => {
+    const msg = buildBulkDiffPreview(1, WALLET, {}, {});
+    expect(msg).toContain('no recognised fields');
+  });
+
+  test('formats array new value as comma-joined string', () => {
+    const newVal = ['addr1111111111111111111111111111', 'addr2222222222222222222222222222'];
+    const msg    = buildBulkDiffPreview(1, WALLET, {}, { tokensCreated: newVal });
+    expect(msg).toContain('addr1111111111111111111111111111, addr2222222222222222222222222222');
   });
 });
