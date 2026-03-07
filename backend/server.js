@@ -245,7 +245,8 @@ bot.on('message', async (msg) => {
   // Auto-expire confirmation after 5 minutes
   setTimeout(() => pendingPremiumData.delete(confirmKey), 5 * 60 * 1000);
 
-  // Clear the pending entry — admin is now in the confirmation step
+  // Clear the pending entry (and its auto-expiry timer) — admin is now in the confirmation step
+  clearTimeout(pending.timeoutId);
   pendingPremiumEntry.delete(String(msg.chat.id));
 
   const preview = buildPremiumPreview(pending.caseNumber, pending.walletAddress, parsed);

@@ -49,7 +49,8 @@ function parsePremiumInput(text) {
     const value     = line.substring(colonIdx + 1).trim();
     const fieldName = PREMIUM_INPUT_KEYS[rawKey];
 
-    if (fieldName && value) result[fieldName] = value;
+    // Skip lines with no value — admins may send partial templates with blank fields
+    if (fieldName && value.length > 0) result[fieldName] = value;
   }
 
   // Split comma-separated strings into arrays for array fields
