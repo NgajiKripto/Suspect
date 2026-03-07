@@ -62,10 +62,67 @@ function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecre
   });
 
   // Public detail — no forensic data, no reporterContact
+  // Supports ?include=premium query param: requires x402-payment secret header
   app.get('/api/wallets/:address', (req, res) => {
     const addr = req.params.address;
     if (!WALLET_ADDRESS_REGEX.test(addr)) return res.status(404).json({ message: 'Not found' });
+
+    if (req.query.include === 'premium') {
+      const paid = req.headers['x402-payment'];
+      if (!paid || !paymentSecret) return res.status(402).json({ error: 'Payment Required', message: 'x402-payment header is required', requiredAmountUSD: 0.11 });
+      try {
+        const paidBuf = Buffer.from(paid);
+        const validBuf = Buffer.from(paymentSecret);
+        if (paidBuf.length !== validBuf.length || !crypto.timingSafeEqual(paidBuf, validBuf)) {
+          return res.status(402).json({ error: 'Payment Required', message: 'Payment verification failed' });
+        }
+      } catch {
+        return res.status(402).json({ error: 'Payment Required', message: 'Payment verification failed' });
+      }
+      return res.json({
+        walletAddress: addr, status: 'verified', riskScore: 95,
+        forensic: { liquidityBefore: 100000, liquidityAfter: 0, drainDurationHours: 2 },
+        premiumForensics: {
+          addLiquidityValue: '45.2 SOL', removeLiquidityValue: '0.3 SOL',
+          walletFunding: 'Tornado Cash', forensicNotes: 'Repeat offender pattern detected',
+          tokensCreated: ['TokenAddr1111111111111111111111111111111111'],
+          crossProjectLinks: ['RelatedAddr111111111111111111111111111111111'],
+          updatedAt: new Date().toISOString()
+        }
+      });
+    }
+
     res.json({ walletAddress: addr, status: 'verified', riskScore: 95 });
+  });
+
+  // Explicit premium unlock: POST /api/wallets/:address/premium/access
+  app.post('/api/wallets/:address/premium/access', (req, res) => {
+    const addr = req.params.address;
+    if (!WALLET_ADDRESS_REGEX.test(addr)) return res.status(404).json({ message: 'Not found' });
+
+    const paid = req.headers['x402-payment'];
+    if (!paid || !paymentSecret) return res.status(402).json({ error: 'Payment Required', message: 'x402-payment header is required', requiredAmountUSD: 0.11 });
+    try {
+      const paidBuf = Buffer.from(paid);
+      const validBuf = Buffer.from(paymentSecret);
+      if (paidBuf.length !== validBuf.length || !crypto.timingSafeEqual(paidBuf, validBuf)) {
+        return res.status(402).json({ error: 'Payment Required', message: 'Payment verification failed' });
+      }
+    } catch {
+      return res.status(402).json({ error: 'Payment Required', message: 'Payment verification failed' });
+    }
+
+    res.json({
+      payerAddress: 'MockPayerAddr11111111111111111111111111111',
+      forensic: { liquidityBefore: 100000, liquidityAfter: 0, drainDurationHours: 2 },
+      premiumForensics: {
+        addLiquidityValue: '45.2 SOL', removeLiquidityValue: '0.3 SOL',
+        walletFunding: 'Tornado Cash', forensicNotes: 'Repeat offender pattern detected',
+        tokensCreated: ['TokenAddr1111111111111111111111111111111111'],
+        crossProjectLinks: ['RelatedAddr111111111111111111111111111111111'],
+        updatedAt: new Date().toISOString()
+      }
+    });
   });
 
   // Premium endpoint
@@ -807,5 +864,279 @@ describe('13. PATCH /api/admin/wallets/:address/premium — Rate Limiting', () =
     // First 3 should succeed (200), remaining should be rate-limited (429)
     expect(results.slice(0, 3).every(s => s === 200)).toBe(true);
     expect(results.slice(3).every(s => s === 429)).toBe(true);
+  });
+});
+
+// ─── New x402 route / middleware tests ───────────────────────────────────────
+
+const jwt = require('jsonwebtoken');
+const { verifyX402Payment, _caches } = require('../middleware/verifyX402Payment');
+
+// ── Shared test EC key pair (ES256) ──────────────────────────────────────────
+const { privateKey: TEST_PRIV_KEY, publicKey: TEST_PUB_KEY } =
+  crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+const TEST_JWK = Object.assign(TEST_PUB_KEY.export({ format: 'jwk' }), {
+  kid: 'test-kid-1',
+  use: 'sig',
+  alg: 'ES256'
+});
+
+function signTestToken(claims, opts = {}) {
+  const keyid = opts.kid !== undefined ? opts.kid : 'test-kid-1';
+  const signOpts = { algorithm: 'ES256', expiresIn: '1h' };
+  if (keyid) signOpts.keyid = keyid;
+  return jwt.sign(claims, TEST_PRIV_KEY, signOpts);
+}
+
+// Preload caches before each middleware test so no real HTTP calls are made
+function injectTestCaches() {
+  _caches.jwks  = { keys: [TEST_JWK], fetchedAt: Date.now() };
+  _caches.price = { priceUSD: 150, fetchedAt: Date.now() };
+}
+
+// ── Minimal test app that uses the real verifyX402Payment middleware ──────────
+function buildMiddlewareTestApp(expectedAmountUSD = 0.11) {
+  const app = express();
+  app.use(express.json());
+  app.post('/test/payment', verifyX402Payment(expectedAmountUSD), (req, res) => {
+    res.json({ success: true, payerAddress: req.x402.payerAddress });
+  });
+  return app;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 14. verifyX402Payment middleware — unit behaviour
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('14. verifyX402Payment middleware — unit behaviour', () => {
+  beforeEach(injectTestCaches);
+
+  test('returns 402 with requiredAmountUSD when no x402-payment header', async () => {
+    const res = await request(buildMiddlewareTestApp()).post('/test/payment');
+    expect(res.status).toBe(402);
+    expect(res.body).toHaveProperty('requiredAmountUSD', 0.11);
+  });
+
+  test('returns 402 for a non-JWT value in the header', async () => {
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', 'not-a-jwt');
+    expect(res.status).toBe(402);
+  });
+
+  test('returns 402 when JWT kid is not in the JWKS', async () => {
+    const token = signTestToken({ amount: 0.11, currency: 'USD', payer: 'Addr1' }, { kid: 'unknown-kid' });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(402);
+    expect(res.body.message).toMatch(/[Uu]nknown.*key/);
+  });
+
+  test('returns 200 with valid ES256 JWT — USD currency', async () => {
+    const payer = 'SolanaPayerAddr111111111111111111111111111';
+    const token = signTestToken({ amount: 0.11, currency: 'USD', payer });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(200);
+    expect(res.body.payerAddress).toBe(payer);
+  });
+
+  test('returns 200 with SOL currency converted via oracle price (0.001 SOL * $150 = $0.15)', async () => {
+    const payer = 'SolanaPayerAddr111111111111111111111111111';
+    const token = signTestToken({ amount: 0.001, currency: 'SOL', payer });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(200);
+    expect(res.body.payerAddress).toBe(payer);
+  });
+
+  test('returns 402 when SOL amount is insufficient (0.0001 SOL * $150 = $0.015 < $0.11)', async () => {
+    const token = signTestToken({ amount: 0.0001, currency: 'SOL', payer: 'PayerAddr1' });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(402);
+    expect(res.body.message).toMatch(/[Ii]nsufficient/);
+  });
+
+  test('returns 402 for exact threshold boundary (0.10 USD < 0.11 required)', async () => {
+    const token = signTestToken({ amount: 0.10, currency: 'USD', payer: 'PayerAddr1' });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(402);
+  });
+
+  test('returns 200 for exact required amount (0.11 USD == 0.11 required)', async () => {
+    const token = signTestToken({ amount: 0.11, currency: 'USD', payer: 'PayerAddr1' });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(200);
+  });
+
+  test('returns 402 for unsupported currency (ETH)', async () => {
+    const token = signTestToken({ amount: 1, currency: 'ETH', payer: 'PayerAddr1' });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(402);
+    expect(res.body.message).toMatch(/[Uu]nsupported/);
+  });
+
+  test('returns 402 when payer address is absent from JWT claims', async () => {
+    const token = signTestToken({ amount: 0.11, currency: 'USD' });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(402);
+    expect(res.body.message).toMatch(/payer/i);
+  });
+
+  test('prefers payer claim over sub for payerAddress', async () => {
+    const payer = 'PayerFromPayerClaim111111111111111111111';
+    const token = signTestToken({ amount: 0.11, currency: 'USD', payer, sub: 'SubClaim' });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(200);
+    expect(res.body.payerAddress).toBe(payer);
+  });
+
+  test('falls back to from claim when payer is absent (x402 protocol convention)', async () => {
+    const from = 'FromPayerAddr111111111111111111111111111';
+    const token = signTestToken({ amount: 0.11, currency: 'USD', from });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(200);
+    expect(res.body.payerAddress).toBe(from);
+  });
+
+  test('falls back to sub claim when payer and from are absent', async () => {
+    const sub = 'SubPayerAddr111111111111111111111111111';
+    const token = signTestToken({ amount: 0.11, currency: 'USD', sub });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(200);
+    expect(res.body.payerAddress).toBe(sub);
+  });
+
+  test('accepts USDC as equivalent to USD', async () => {
+    const token = signTestToken({ amount: 0.11, currency: 'USDC', payer: 'PayerAddr1' });
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', token);
+    expect(res.status).toBe(200);
+  });
+
+  test('uses first key in JWKS when JWT has no kid', async () => {
+    // Sign without keyid so the JWT header contains no kid — middleware should fall back to keys[0]
+    const tokenNoKid = jwt.sign(
+      { amount: 0.11, currency: 'USD', payer: 'PayerAddr1' },
+      TEST_PRIV_KEY,
+      { algorithm: 'ES256', expiresIn: '1h' }
+    );
+    const res = await request(buildMiddlewareTestApp())
+      .post('/test/payment')
+      .set('x402-payment', tokenNoKid);
+    expect(res.status).toBe(200);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 15. GET /api/wallets/:address?include=premium — premium query gate
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('15. GET /api/wallets/:address?include=premium — premium query gate', () => {
+  const secret = 'premium-gate-secret';
+  const app    = buildTestApp({ paymentSecret: secret });
+
+  test('returns public data (no forensics) without ?include=premium', async () => {
+    const res = await request(app).get(`/api/wallets/${VALID_ADDRESS}`);
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('forensic');
+    expect(res.body).not.toHaveProperty('premiumForensics');
+  });
+
+  test('returns 402 when ?include=premium but no x402-payment header', async () => {
+    const res = await request(app).get(`/api/wallets/${VALID_ADDRESS}?include=premium`);
+    expect(res.status).toBe(402);
+    expect(res.body).toHaveProperty('requiredAmountUSD', 0.11);
+  });
+
+  test('returns 402 when ?include=premium with wrong payment token', async () => {
+    const res = await request(app)
+      .get(`/api/wallets/${VALID_ADDRESS}?include=premium`)
+      .set('x402-payment', 'wrong-token');
+    expect(res.status).toBe(402);
+  });
+
+  test('returns full forensic data with correct payment token and ?include=premium', async () => {
+    const res = await request(app)
+      .get(`/api/wallets/${VALID_ADDRESS}?include=premium`)
+      .set('x402-payment', secret);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('forensic');
+    expect(res.body).toHaveProperty('premiumForensics');
+    expect(res.body.premiumForensics).toHaveProperty('addLiquidityValue');
+  });
+
+  test('other query params do not trigger payment gate', async () => {
+    const res = await request(app).get(`/api/wallets/${VALID_ADDRESS}?include=basic`);
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('forensic');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 16. POST /api/wallets/:address/premium/access — explicit unlock endpoint
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('16. POST /api/wallets/:address/premium/access — explicit unlock', () => {
+  const secret = 'unlock-endpoint-secret';
+  const app    = buildTestApp({ paymentSecret: secret });
+
+  test('returns 402 when no x402-payment header', async () => {
+    const res = await request(app).post(`/api/wallets/${VALID_ADDRESS}/premium/access`);
+    expect(res.status).toBe(402);
+    expect(res.body).toHaveProperty('requiredAmountUSD', 0.11);
+  });
+
+  test('returns 402 with wrong payment token', async () => {
+    const res = await request(app)
+      .post(`/api/wallets/${VALID_ADDRESS}/premium/access`)
+      .set('x402-payment', 'wrong-token');
+    expect(res.status).toBe(402);
+  });
+
+  test('returns 200 with forensic + premiumForensics on valid payment', async () => {
+    const res = await request(app)
+      .post(`/api/wallets/${VALID_ADDRESS}/premium/access`)
+      .set('x402-payment', secret);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('payerAddress');
+    expect(res.body).toHaveProperty('forensic');
+    expect(res.body).toHaveProperty('premiumForensics');
+  });
+
+  test('response includes premiumForensics.addLiquidityValue on success', async () => {
+    const res = await request(app)
+      .post(`/api/wallets/${VALID_ADDRESS}/premium/access`)
+      .set('x402-payment', secret);
+    expect(res.status).toBe(200);
+    expect(res.body.premiumForensics).toHaveProperty('addLiquidityValue');
+    expect(res.body.premiumForensics).toHaveProperty('walletFunding');
+  });
+
+  test('returns 404 for an invalid (non-Base58) wallet address', async () => {
+    const res = await request(app)
+      .post('/api/wallets/not-valid-0OIl/premium/access')
+      .set('x402-payment', secret);
+    expect(res.status).toBe(404);
   });
 });

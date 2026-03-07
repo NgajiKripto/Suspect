@@ -18,10 +18,10 @@
         Strict-mode meta tag (replace the tag below once migration is complete):
         <meta http-equiv="Content-Security-Policy" content="
             default-src 'none';
-            script-src 'self' 'nonce-{NONCE_VALUE}';
+            script-src 'self' 'nonce-{NONCE_VALUE}' https://cdn.x402gateway.io;
             style-src 'self' 'nonce-{NONCE_VALUE}' https://cdnjs.cloudflare.com;
             img-src 'self' https:;
-            connect-src 'self' https://suspected.dev;
+            connect-src 'self' https://suspected.dev https://www.x402gateway.io;
             font-src 'self' https://cdnjs.cloudflare.com;
             frame-src 'none';
             object-src 'none';
@@ -31,10 +31,10 @@
     -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'none';
-        script-src 'self' 'unsafe-inline';
+        script-src 'self' 'unsafe-inline' https://cdn.x402gateway.io;
         style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com;
         img-src 'self' https:;
-        connect-src 'self' https://suspected.dev;
+        connect-src 'self' https://suspected.dev https://www.x402gateway.io;
         font-src 'self' https://cdnjs.cloudflare.com;
         frame-src 'none';
         object-src 'none';
@@ -1089,7 +1089,30 @@
         .wallet-table-link:hover {
             text-decoration: underline;
         }
+        .btn-unlock-premium {
+            background: transparent;
+            border: 1px solid var(--hazard-orange);
+            color: var(--hazard-orange);
+            border-radius: 4px;
+            padding: 3px 8px;
+            font-size: 0.78rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 0.15s, color 0.15s;
+        }
+        .btn-unlock-premium:hover:not(:disabled) {
+            background: var(--hazard-orange);
+            color: #fff;
+        }
+        .btn-unlock-premium:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
     </style>
+    <!-- x402gateway.io SDK: enables x402 micropayment flow for premium forensic data unlock.
+         SECURITY NOTE: Add an integrity="sha384-..." SRI hash attribute once the SDK URL is
+         finalised and a published hash is available from x402gateway.io. -->
+    <script src="https://cdn.x402gateway.io/sdk/v1/x402.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
 <body>
     <!-- Apply theme immediately -->
@@ -1755,6 +1778,7 @@
                                     <th>Description</th>
                                     <th>Status</th>
                                     <th>Risk Score</th>
+                                    <th>Premium</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1821,6 +1845,10 @@
                 ? `<a href="https://solscan.io/tx/${safeTxHash}" target="_blank" rel="noopener noreferrer" class="wallet-table-link">${safeTxHash.substring(0, 8)}...${safeTxHash.substring(safeTxHash.length - 8)}</a>`
                 : '—';
             const statusClass = wallet.status === 'verified' ? 'status-confirmed' : 'status-suspicious';
+            // Safe base58 wallet address for use as a data attribute (button click handler reads it)
+            const safeAddr = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet.walletAddress || '')
+                ? escapeHtml(wallet.walletAddress)
+                : '';
 
             return `
                 <tr>
@@ -1831,13 +1859,129 @@
                     <td>${escapeHtml(wallet.evidence?.description) || '—'}</td>
                     <td><span class="status-badge ${statusClass}">${escapeHtml(wallet.status) || '—'}</span></td>
                     <td>${escapeHtml(wallet.riskScore) || '—'}</td>
+                    <td>${safeAddr
+                        ? `<button class="btn-unlock-premium" data-wallet="${safeAddr}" aria-label="Unlock premium forensic data for wallet ${safeAddr}">🔓 Unlock ($0.11)</button>`
+                        : '—'}</td>
                 </tr>
             `;
         }
 
         // ==========================================
-        // ANIMATION: SEGMENTED BARS
+        // PREMIUM FORENSICS UNLOCK (x402 payment)
         // ==========================================
+
+        /**
+         * unlockPremiumData(walletAddress)
+         *
+         * Initiates an x402 micropayment flow for the given wallet address:
+         *   1. Calls POST /api/wallets/:address/premium/access (expects 402 on first attempt).
+         *   2. Uses the x402gateway.io SDK to fulfill the payment requirement.
+         *   3. Retries the request with the payment token in the x402-payment header.
+         *   4. Displays the returned premiumForensics data in a notification.
+         *
+         * Frontend integration note: requires the x402gateway.io SDK to be loaded
+         * (see <script src="https://cdn.x402gateway.io/sdk/v1/x402.min.js"> in <head>).
+         */
+        async function unlockPremiumData(walletAddress) {
+            const btn = document.querySelector(`.btn-unlock-premium[data-wallet="${CSS.escape(walletAddress)}"]`);
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '⏳ Processing…';
+            }
+
+            try {
+                const endpoint = `${API_BASE_URL}/wallets/${encodeURIComponent(walletAddress)}/premium/access`;
+
+                // Step 1: probe the endpoint — expect a 402 with payment details
+                const probeRes = await fetch(endpoint, { method: 'POST' });
+
+                let paymentToken = null;
+
+                if (probeRes.status === 402) {
+                    // Step 2: read required amount from 402 response (avoids frontend/backend drift)
+                    const payReq = await probeRes.json().catch(() => ({}));
+                    const requiredAmount = typeof payReq.requiredAmountUSD === 'number'
+                        ? payReq.requiredAmountUSD
+                        : 0.11;
+
+                    // Request payment via x402gateway.io SDK
+                    if (typeof window.x402 !== 'undefined' && typeof window.x402.requestPayment === 'function') {
+                        paymentToken = await window.x402.requestPayment({
+                            amount:    requiredAmount,
+                            currency:  'USD',
+                            recipient: 'suspected.dev',
+                            memo:      `Premium forensic data: ${walletAddress}`
+                        });
+                    } else {
+                        showNotification('x402 payment SDK not loaded. Please refresh and try again.', 'error');
+                        return;
+                    }
+                } else if (probeRes.ok) {
+                    // Payment not required (e.g. already authorized) — use the direct response
+                    const data = await probeRes.json();
+                    displayPremiumData(walletAddress, data);
+                    return;
+                } else {
+                    const err = await probeRes.json().catch(() => ({}));
+                    showNotification(`Error: ${escapeHtml(err.message || 'Unexpected error')}`, 'error');
+                    return;
+                }
+
+                // Step 3: retry with the payment token
+                const paidRes = await fetch(endpoint, {
+                    method:  'POST',
+                    headers: { 'x402-payment': paymentToken }
+                });
+
+                if (!paidRes.ok) {
+                    const err = await paidRes.json().catch(() => ({}));
+                    showNotification(`Payment failed: ${escapeHtml(err.message || 'Verification error')}`, 'error');
+                    return;
+                }
+
+                const data = await paidRes.json();
+                displayPremiumData(walletAddress, data);
+
+            } catch (error) {
+                showNotification(`Unlock failed: ${escapeHtml(error.message)}`, 'error');
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = '🔓 Unlock ($0.11)';
+                }
+            }
+        }
+
+        /**
+         * Renders a premium forensics payload in a browser notification.
+         */
+        function displayPremiumData(walletAddress, data) {
+            const pf = data.premiumForensics;
+            if (!pf) {
+                showNotification('No premium forensic data available for this wallet yet.', 'info');
+                return;
+            }
+            const lines = [
+                `💎 Premium Forensics — ${escapeHtml(walletAddress)}`,
+                pf.addLiquidityValue    ? `Add Liq: ${escapeHtml(pf.addLiquidityValue)}`       : null,
+                pf.removeLiquidityValue ? `Remove Liq: ${escapeHtml(pf.removeLiquidityValue)}` : null,
+                pf.walletFunding        ? `Funding: ${escapeHtml(pf.walletFunding)}`            : null,
+                pf.forensicNotes        ? `Notes: ${escapeHtml(pf.forensicNotes)}`              : null
+            ].filter(Boolean).join('\n');
+            showNotification(lines, 'success');
+        }
+
+        // Delegate unlock button clicks — avoids per-row event listener churn
+        document.addEventListener('click', function(e) {
+            const btn = e.target.closest('.btn-unlock-premium');
+            if (!btn) return;
+            const addr = btn.dataset.wallet || '';
+            if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) {
+                unlockPremiumData(addr);
+            }
+        });
+
+
         
         function animateSegmentedBars() {
             const HIGH_RISK_THRESHOLD = 90;
