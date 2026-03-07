@@ -12,6 +12,13 @@ const TelegramBot = require('node-telegram-bot-api');
 
 const Wallet = require('./models/wallet');
 const { verifyX402Payment } = require('./middleware/verifyX402Payment');
+const {
+  parsePremiumInput,
+  validatePremiumFields,
+  buildPremiumPreview,
+  PREMIUM_HELP_TEXT,
+  PREMIUM_INPUT_KEYS
+} = require('./botUtils');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -79,19 +86,30 @@ mongoose.connect(process.env.MONGODB_URI)
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const chatId = process.env.TELEGRAM_CHAT_ID;
 
-// STEP 1: Admin isi forensic data
+// Tracks which wallet an admin is currently entering premium data for (chatId → pending entry)
+const pendingPremiumEntry = new Map();
+// Stores parsed premium data awaiting admin confirmation (confirmKey → confirmation info)
+const pendingPremiumData = new Map();
+
+// STEP 1: Admin receives report notification with 4-button inline keyboard
 const requestForensicInput = async (wallet) => {
-  await bot.sendMessage(chatId,
-    `📋 Case #${wallet.caseNumber}
-
-Isi forensic data dengan format:
-
-LiquidityBefore:
-LiquidityAfter:
-DrainDurationHours:
-DetectedPattern:
-WalletFunding:
-`
+  await bot.sendMessage(
+    chatId,
+    `📋 New Report — Case #${wallet.caseNumber}\n\n📍 Wallet: ${wallet.walletAddress}\n📝 ${wallet.evidence?.description || '(no description)'}\n\nIsi forensic data dan gunakan tombol di bawah:`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '🔍 Review',           callback_data: `review_${wallet._id}` },
+            { text: '✅ Verify',           callback_data: `verify_${wallet._id}` }
+          ],
+          [
+            { text: '❌ Reject',           callback_data: `reject_${wallet._id}` },
+            { text: '📝 Add Premium Data', callback_data: `addpremium_${wallet._id}` }
+          ]
+        ]
+      }
+    }
   );
 };
 
@@ -185,12 +203,184 @@ bot.on('message', async (msg) => {
   await bot.sendMessage(chatId, `🔐 Premium forensics saved for Case #${wallet.caseNumber}.`);
 });
 
-// STEP 3: Verify only after forensic filled
+// /premium_help — show admin the exact input format
+bot.onText(/\/premium_help/, async (msg) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+  await bot.sendMessage(chatId, PREMIUM_HELP_TEXT);
+});
+
+// STEP 2c: Handle structured ADD_LIQ/REM_LIQ format input after [📝 Add Premium Data]
+bot.on('message', async (msg) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+  if (!msg.text) return;
+
+  // Only process when admin has an active pending premium entry for this chat
+  const pending = pendingPremiumEntry.get(String(msg.chat.id));
+  if (!pending) return;
+
+  // Check the message contains at least one recognised premium format key
+  const hasFormatKey = Object.keys(PREMIUM_INPUT_KEYS).some(k => msg.text.includes(k + ':'));
+  if (!hasFormatKey) return;
+
+  const parsed = parsePremiumInput(msg.text);
+
+  // Validate parsed fields (same rules as PATCH endpoint)
+  const errors = validatePremiumFields(parsed);
+  if (errors.length > 0) {
+    await bot.sendMessage(
+      chatId,
+      `❌ Validation failed for Case #${pending.caseNumber}:\n\n${errors.map(e => `• ${e}`).join('\n')}\n\nPlease correct the format and try again. Use /premium_help for guidance.`
+    );
+    return;
+  }
+
+  // Store parsed data under a short random key, then ask for confirmation
+  const confirmKey = crypto.randomBytes(8).toString('hex');
+  pendingPremiumData.set(confirmKey, {
+    walletId:      pending.walletId,
+    walletAddress: pending.walletAddress,
+    caseNumber:    pending.caseNumber,
+    parsed
+  });
+  // Auto-expire confirmation after 5 minutes
+  setTimeout(() => pendingPremiumData.delete(confirmKey), 5 * 60 * 1000);
+
+  // Clear the pending entry (and its auto-expiry timer) — admin is now in the confirmation step
+  clearTimeout(pending.timeoutId);
+  pendingPremiumEntry.delete(String(msg.chat.id));
+
+  const preview = buildPremiumPreview(pending.caseNumber, pending.walletAddress, parsed);
+  await bot.sendMessage(chatId, preview, {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '✅ Confirm', callback_data: `confirmpremium_${confirmKey}` },
+        { text: '❌ Cancel',  callback_data: `cancelpremium_${confirmKey}` }
+      ]]
+    }
+  });
+});
+
+// STEP 3: Handle inline keyboard callbacks
 bot.on('callback_query', async (query) => {
   // Only process callbacks from the authorized chat
   if (String(query.message?.chat?.id) !== String(chatId)) return;
 
   const [action, id] = query.data.split('_');
+
+  if (action === 'review') {
+    const wallet = await Wallet.findById(id);
+    if (!wallet) {
+      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+    }
+    await bot.answerCallbackQuery(query.id, { text: 'Loading details…' });
+    await bot.sendMessage(
+      chatId,
+      `🔍 Case #${wallet.caseNumber}\n\n` +
+      `📍 Address: ${wallet.walletAddress}\n` +
+      `📊 Status: ${wallet.status}\n` +
+      `⚠️ Risk Score: ${wallet.riskScore ?? 'N/A'}\n` +
+      `📝 Description: ${wallet.evidence?.description || '(none)'}\n` +
+      `🔗 Tx Hash: ${wallet.evidence?.txHash || '(none)'}\n` +
+      `🗂 Reports: ${wallet.reportCount ?? 1}`
+    );
+    return;
+  }
+
+  if (action === 'reject') {
+    const wallet = await Wallet.findById(id);
+    if (!wallet) {
+      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+    }
+    wallet.status = 'rejected';
+    await wallet.save();
+    await bot.answerCallbackQuery(query.id, { text: '❌ Case rejected.' });
+    await bot.sendMessage(chatId, `❌ Case #${wallet.caseNumber} has been rejected.`);
+    return;
+  }
+
+  if (action === 'addpremium') {
+    const wallet = await Wallet.findById(id);
+    if (!wallet) {
+      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+    }
+    // Store pending entry so the next matching message is attributed to this wallet
+    const timeoutId = setTimeout(
+      () => pendingPremiumEntry.delete(String(chatId)),
+      10 * 60 * 1000
+    );
+    pendingPremiumEntry.set(String(chatId), {
+      walletId:      wallet._id,
+      walletAddress: wallet.walletAddress,
+      caseNumber:    wallet.caseNumber,
+      timeoutId
+    });
+    await bot.answerCallbackQuery(query.id, { text: 'Send premium data now.' });
+    await bot.sendMessage(
+      chatId,
+      `📝 Enter premium forensic data for Case #${wallet.caseNumber} in the format:\n\n` +
+      `ADD_LIQ: 45.2 SOL\n` +
+      `REM_LIQ: 0.3 SOL\n` +
+      `FUNDING: CEX withdrawal (Binance)\n` +
+      `TOKENS: Token1Addr,Token2Addr\n` +
+      `NOTES: Repeated rugpull pattern across 3 projects\n` +
+      `LINKS: RelatedWallet1,RelatedWallet2\n\n` +
+      `Use /premium_help for field rules.`
+    );
+    return;
+  }
+
+  if (action === 'confirmpremium') {
+    const pendingData = pendingPremiumData.get(id);
+    if (!pendingData) {
+      return bot.answerCallbackQuery(query.id, {
+        text: '❌ Confirmation expired. Please click [📝 Add Premium Data] again.'
+      });
+    }
+    pendingPremiumData.delete(id);
+
+    const wallet = await Wallet.findById(pendingData.walletId);
+    if (!wallet) {
+      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+    }
+
+    const { parsed } = pendingData;
+    const update = { updatedAt: new Date() };
+    const fieldsChanged = [];
+
+    if (parsed.addLiquidityValue !== undefined)   { update.addLiquidityValue   = parsed.addLiquidityValue;   fieldsChanged.push('addLiquidityValue'); }
+    if (parsed.removeLiquidityValue !== undefined) { update.removeLiquidityValue = parsed.removeLiquidityValue; fieldsChanged.push('removeLiquidityValue'); }
+    if (parsed.walletFunding !== undefined)        { update.walletFunding        = parsed.walletFunding;        fieldsChanged.push('walletFunding'); }
+    if (parsed.tokensCreated !== undefined)        { update.tokensCreated        = parsed.tokensCreated;        fieldsChanged.push('tokensCreated'); }
+    if (parsed.forensicNotes !== undefined)        { update.forensicNotes        = parsed.forensicNotes;        fieldsChanged.push('forensicNotes'); }
+    if (parsed.crossProjectLinks !== undefined)    { update.crossProjectLinks    = parsed.crossProjectLinks;    fieldsChanged.push('crossProjectLinks'); }
+
+    wallet.set('premiumForensics', Object.assign(
+      wallet.premiumForensics ? wallet.premiumForensics.toObject() : {},
+      update
+    ));
+    await wallet.save();
+
+    writeAdminAuditLog({
+      updatedBy:     'telegram-admin',
+      timestamp:     new Date().toISOString(),
+      fieldsChanged,
+      walletAddress: wallet.walletAddress
+    });
+
+    await bot.answerCallbackQuery(query.id, { text: '✅ Saved!' });
+    await bot.sendMessage(
+      chatId,
+      `✅ Premium forensics saved for Case #${wallet.caseNumber}.\nFields updated: ${fieldsChanged.join(', ') || 'none'}`
+    );
+    return;
+  }
+
+  if (action === 'cancelpremium') {
+    pendingPremiumData.delete(id);
+    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' });
+    await bot.sendMessage(chatId, '❌ Premium data entry cancelled.');
+    return;
+  }
 
   if (action === 'verify') {
     const wallet = await Wallet.findById(id);

@@ -18,6 +18,12 @@ const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const crypto = require('crypto');
 const request = require('supertest');
+const {
+  parsePremiumInput,
+  validatePremiumFields,
+  buildPremiumPreview,
+  PREMIUM_HELP_TEXT
+} = require('../botUtils');
 
 // ─── Shared regex (mirrors server.js) ────────────────────────────────────────
 const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -1138,5 +1144,261 @@ describe('16. POST /api/wallets/:address/premium/access — explicit unlock', ()
       .post('/api/wallets/not-valid-0OIl/premium/access')
       .set('x402-payment', secret);
     expect(res.status).toBe(404);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 17. Bot — parsePremiumInput
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('17. Bot — parsePremiumInput', () => {
+  test('parses ADD_LIQ into addLiquidityValue', () => {
+    expect(parsePremiumInput('ADD_LIQ: 45.2 SOL').addLiquidityValue).toBe('45.2 SOL');
+  });
+
+  test('parses REM_LIQ into removeLiquidityValue', () => {
+    expect(parsePremiumInput('REM_LIQ: 0.3 SOL').removeLiquidityValue).toBe('0.3 SOL');
+  });
+
+  test('parses FUNDING into walletFunding', () => {
+    expect(parsePremiumInput('FUNDING: CEX withdrawal (Binance)').walletFunding).toBe('CEX withdrawal (Binance)');
+  });
+
+  test('parses NOTES into forensicNotes', () => {
+    expect(parsePremiumInput('NOTES: Repeated rugpull pattern across 3 projects').forensicNotes)
+      .toBe('Repeated rugpull pattern across 3 projects');
+  });
+
+  test('parses TOKENS into a tokensCreated array', () => {
+    const result = parsePremiumInput('TOKENS: So11111111111111111111111111111111111111112,TokenAddr1111111111111111111111111111111111');
+    expect(Array.isArray(result.tokensCreated)).toBe(true);
+    expect(result.tokensCreated).toHaveLength(2);
+    expect(result.tokensCreated[0]).toBe('So11111111111111111111111111111111111111112');
+  });
+
+  test('parses LINKS into a crossProjectLinks array', () => {
+    const result = parsePremiumInput('LINKS: So11111111111111111111111111111111111111112,TokenAddr1111111111111111111111111111111111');
+    expect(Array.isArray(result.crossProjectLinks)).toBe(true);
+    expect(result.crossProjectLinks).toHaveLength(2);
+  });
+
+  test('parses a full multi-line input correctly', () => {
+    const text = [
+      'ADD_LIQ: 45.2 SOL',
+      'REM_LIQ: 0.3 SOL',
+      'FUNDING: Binance',
+      'TOKENS: So11111111111111111111111111111111111111112',
+      'NOTES: test note',
+      'LINKS: TokenAddr1111111111111111111111111111111111'
+    ].join('\n');
+    const result = parsePremiumInput(text);
+    expect(result.addLiquidityValue).toBe('45.2 SOL');
+    expect(result.removeLiquidityValue).toBe('0.3 SOL');
+    expect(result.walletFunding).toBe('Binance');
+    expect(result.forensicNotes).toBe('test note');
+    expect(Array.isArray(result.tokensCreated)).toBe(true);
+    expect(Array.isArray(result.crossProjectLinks)).toBe(true);
+  });
+
+  test('ignores unknown keys', () => {
+    const result = parsePremiumInput('UNKNOWN: value\nADD_LIQ: 10 SOL');
+    expect(result).not.toHaveProperty('UNKNOWN');
+    expect(result.addLiquidityValue).toBe('10 SOL');
+  });
+
+  test('returns empty object for empty string', () => {
+    expect(parsePremiumInput('')).toEqual({});
+  });
+
+  test('returns empty object for non-string input', () => {
+    expect(parsePremiumInput(null)).toEqual({});
+    expect(parsePremiumInput(undefined)).toEqual({});
+  });
+
+  test('key matching is case-insensitive (lower-case input normalised)', () => {
+    expect(parsePremiumInput('add_liq: 5 SOL').addLiquidityValue).toBe('5 SOL');
+  });
+
+  test('strips extra whitespace from values', () => {
+    expect(parsePremiumInput('ADD_LIQ:   20 SOL  ').addLiquidityValue).toBe('20 SOL');
+  });
+
+  test('handles colon in value correctly (only splits on first colon)', () => {
+    expect(parsePremiumInput('FUNDING: CEX: Binance').walletFunding).toBe('CEX: Binance');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 18. Bot — validatePremiumFields
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('18. Bot — validatePremiumFields', () => {
+  test('returns no errors for empty data object', () => {
+    expect(validatePremiumFields({})).toHaveLength(0);
+  });
+
+  test('accepts valid addLiquidityValue (number + SOL)', () => {
+    expect(validatePremiumFields({ addLiquidityValue: '45.2 SOL' })).toHaveLength(0);
+  });
+
+  test('accepts addLiquidityValue without currency unit', () => {
+    expect(validatePremiumFields({ addLiquidityValue: '100' })).toHaveLength(0);
+  });
+
+  test('accepts addLiquidityValue with USDC', () => {
+    expect(validatePremiumFields({ addLiquidityValue: '50.5 USDC' })).toHaveLength(0);
+  });
+
+  test('rejects addLiquidityValue with letters before number', () => {
+    const errors = validatePremiumFields({ addLiquidityValue: 'abc SOL' });
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]).toMatch(/ADD_LIQ/);
+  });
+
+  test('accepts valid removeLiquidityValue', () => {
+    expect(validatePremiumFields({ removeLiquidityValue: '0.3 SOL' })).toHaveLength(0);
+  });
+
+  test('rejects removeLiquidityValue with invalid format', () => {
+    const errors = validatePremiumFields({ removeLiquidityValue: '<script>' });
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]).toMatch(/REM_LIQ/);
+  });
+
+  test('accepts walletFunding under 200 chars with no HTML', () => {
+    expect(validatePremiumFields({ walletFunding: 'CEX withdrawal (Binance)' })).toHaveLength(0);
+  });
+
+  test('rejects walletFunding with HTML tags', () => {
+    const errors = validatePremiumFields({ walletFunding: '<script>alert(1)</script>' });
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]).toMatch(/FUNDING/);
+  });
+
+  test('rejects walletFunding exceeding 200 chars', () => {
+    expect(validatePremiumFields({ walletFunding: 'A'.repeat(201) })).toHaveLength(1);
+  });
+
+  test('accepts tokensCreated as array of valid Base58 addresses', () => {
+    expect(validatePremiumFields({
+      tokensCreated: ['So11111111111111111111111111111111111111112']
+    })).toHaveLength(0);
+  });
+
+  test('rejects tokensCreated with invalid Base58 address', () => {
+    const errors = validatePremiumFields({ tokensCreated: ['not-valid-0OIl'] });
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]).toMatch(/TOKENS/);
+  });
+
+  test('rejects tokensCreated as non-array', () => {
+    expect(validatePremiumFields({ tokensCreated: 'not-an-array' })).toHaveLength(1);
+  });
+
+  test('accepts forensicNotes as string', () => {
+    expect(validatePremiumFields({ forensicNotes: 'Repeat offender detected' })).toHaveLength(0);
+  });
+
+  test('rejects forensicNotes as non-string', () => {
+    expect(validatePremiumFields({ forensicNotes: 12345 })).toHaveLength(1);
+  });
+
+  test('accepts crossProjectLinks as valid Base58 array', () => {
+    expect(validatePremiumFields({
+      crossProjectLinks: ['So11111111111111111111111111111111111111112']
+    })).toHaveLength(0);
+  });
+
+  test('rejects crossProjectLinks with invalid address', () => {
+    const errors = validatePremiumFields({ crossProjectLinks: ['<bad>'] });
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]).toMatch(/LINKS/);
+  });
+
+  test('returns multiple errors when multiple fields are invalid', () => {
+    const errors = validatePremiumFields({
+      addLiquidityValue: 'bad',
+      walletFunding: '<b>html</b>'
+    });
+    expect(errors.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 19. Bot — buildPremiumPreview
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('19. Bot — buildPremiumPreview', () => {
+  const WALLET = 'So11111111111111111111111111111111111111112';
+
+  test('includes case number in preview', () => {
+    expect(buildPremiumPreview(42, WALLET, {})).toContain('Case #42');
+  });
+
+  test('includes wallet address in preview', () => {
+    expect(buildPremiumPreview(1, WALLET, {})).toContain(WALLET);
+  });
+
+  test('shows "(not set)" for all missing fields', () => {
+    const msg = buildPremiumPreview(1, WALLET, {});
+    expect(msg).toContain('(not set)');
+  });
+
+  test('includes a confirmation prompt', () => {
+    expect(buildPremiumPreview(1, WALLET, {})).toMatch(/[Cc]onfirm/);
+  });
+
+  test('formats array values as comma-joined string', () => {
+    const parsed = {
+      tokensCreated: ['addr1111111111111111111111111111', 'addr2222222222222222222222222222']
+    };
+    const msg = buildPremiumPreview(1, WALLET, parsed);
+    expect(msg).toContain('addr1111111111111111111111111111, addr2222222222222222222222222222');
+  });
+
+  test('shows provided scalar field values', () => {
+    const parsed = { addLiquidityValue: '45.2 SOL', walletFunding: 'Binance Hot Wallet' };
+    const msg = buildPremiumPreview(5, WALLET, parsed);
+    expect(msg).toContain('45.2 SOL');
+    expect(msg).toContain('Binance Hot Wallet');
+  });
+
+  test('contains all six field labels', () => {
+    const msg = buildPremiumPreview(1, WALLET, {});
+    expect(msg).toContain('ADD_LIQ');
+    expect(msg).toContain('REM_LIQ');
+    expect(msg).toContain('FUNDING');
+    expect(msg).toContain('TOKENS');
+    expect(msg).toContain('NOTES');
+    expect(msg).toContain('LINKS');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 20. Bot — PREMIUM_HELP_TEXT content
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('20. Bot — PREMIUM_HELP_TEXT', () => {
+  test('contains all six format keys', () => {
+    expect(PREMIUM_HELP_TEXT).toContain('ADD_LIQ');
+    expect(PREMIUM_HELP_TEXT).toContain('REM_LIQ');
+    expect(PREMIUM_HELP_TEXT).toContain('FUNDING');
+    expect(PREMIUM_HELP_TEXT).toContain('TOKENS');
+    expect(PREMIUM_HELP_TEXT).toContain('NOTES');
+    expect(PREMIUM_HELP_TEXT).toContain('LINKS');
+  });
+
+  test('contains example values', () => {
+    expect(PREMIUM_HELP_TEXT).toContain('45.2 SOL');
+    expect(PREMIUM_HELP_TEXT).toContain('0.3 SOL');
+  });
+
+  test('mentions field validation constraints', () => {
+    expect(PREMIUM_HELP_TEXT).toContain('200 chars');
+    expect(PREMIUM_HELP_TEXT).toContain('Base58');
+  });
+
+  test('mentions /premium_help command', () => {
+    expect(PREMIUM_HELP_TEXT).toContain('/premium_help');
   });
 });
