@@ -17,7 +17,12 @@ const {
   validatePremiumFields,
   buildPremiumPreview,
   PREMIUM_HELP_TEXT,
-  PREMIUM_INPUT_KEYS
+  PREMIUM_INPUT_KEYS,
+  CAMEL_TO_KEY,
+  SENSITIVE_FIELDS,
+  buildEditCurrentValues,
+  buildDiffPreview,
+  buildBulkDiffPreview
 } = require('./botUtils');
 
 const app = express();
@@ -90,6 +95,35 @@ const chatId = process.env.TELEGRAM_CHAT_ID;
 const pendingPremiumEntry = new Map();
 // Stores parsed premium data awaiting admin confirmation (confirmKey → confirmation info)
 const pendingPremiumData = new Map();
+
+// ── /edit_premium state ────────────────────────────────────────────────────
+// Tracks an active field-edit prompt: chatId → { walletId, walletAddress, caseNumber, fieldName, oldValue, timeoutId }
+const pendingFieldEdit = new Map();
+// Stores single-field diff awaiting confirmation: confirmKey → { walletId, walletAddress, caseNumber, fieldName, oldValue, newValue }
+const pendingEditConfirm = new Map();
+// Stores bulk-field diff awaiting confirmation: confirmKey → { walletId, walletAddress, caseNumber, currentData, parsed }
+const pendingBulkEdit = new Map();
+
+// Per-admin edit rate limiter: chatId → { count, windowStart }
+const adminEditRateLimiter = new Map();
+const EDIT_RATE_LIMIT     = 5;
+const EDIT_RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Check and increment the per-admin edit rate limit.
+ * Returns true if the action is allowed; false if the limit has been exceeded.
+ */
+function checkAdminEditRateLimit(adminChatId) {
+  const now   = Date.now();
+  const entry = adminEditRateLimiter.get(adminChatId);
+  if (!entry || now - entry.windowStart > EDIT_RATE_WINDOW_MS) {
+    adminEditRateLimiter.set(adminChatId, { count: 1, windowStart: now });
+    return true;
+  }
+  if (entry.count >= EDIT_RATE_LIMIT) return false;
+  entry.count++;
+  return true;
+}
 
 // STEP 1: Admin receives report notification with 4-button inline keyboard
 const requestForensicInput = async (wallet) => {
@@ -209,6 +243,57 @@ bot.onText(/\/premium_help/, async (msg) => {
   await bot.sendMessage(chatId, PREMIUM_HELP_TEXT);
 });
 
+// /edit_premium [caseNumber|walletAddress] — edit premium forensic data on a verified report
+bot.onText(/\/edit_premium(?:\s+(.+))?/, async (msg, match) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+
+  const query = match[1]?.trim();
+  if (!query) {
+    await bot.sendMessage(
+      chatId,
+      'Usage: /edit_premium [caseNumber] or [walletAddress]\n\nExample:\n  /edit_premium 42\n  /edit_premium So11111111111111111111111111111111111111112'
+    );
+    return;
+  }
+
+  let wallet;
+  if (/^\d+$/.test(query)) {
+    wallet = await Wallet.findOne({ caseNumber: parseInt(query, 10), status: 'verified' });
+  } else if (WALLET_ADDRESS_REGEX.test(query)) {
+    wallet = await Wallet.findOne({ walletAddress: query, status: 'verified' });
+  } else {
+    await bot.sendMessage(chatId, '❌ Invalid input. Provide a numeric case number or a valid Solana wallet address.');
+    return;
+  }
+
+  if (!wallet) {
+    await bot.sendMessage(chatId, '❌ No verified wallet found for that case number or address.');
+    return;
+  }
+
+  const currentData = wallet.premiumForensics ? wallet.premiumForensics.toObject() : {};
+  const text        = buildEditCurrentValues(wallet.caseNumber, wallet.walletAddress, currentData);
+
+  await bot.sendMessage(chatId, text, {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '✏️ ADD_LIQ', callback_data: `editfield_addLiquidityValue_${wallet._id}` },
+          { text: '✏️ REM_LIQ', callback_data: `editfield_removeLiquidityValue_${wallet._id}` }
+        ],
+        [
+          { text: '✏️ FUNDING', callback_data: `editfield_walletFunding_${wallet._id}` },
+          { text: '✏️ TOKENS',  callback_data: `editfield_tokensCreated_${wallet._id}` }
+        ],
+        [
+          { text: '✏️ NOTES',  callback_data: `editfield_forensicNotes_${wallet._id}` },
+          { text: '✏️ LINKS',  callback_data: `editfield_crossProjectLinks_${wallet._id}` }
+        ]
+      ]
+    }
+  });
+});
+
 // STEP 2c: Handle structured ADD_LIQ/REM_LIQ format input after [📝 Add Premium Data]
 bot.on('message', async (msg) => {
   if (String(msg.chat.id) !== String(chatId)) return;
@@ -260,12 +345,176 @@ bot.on('message', async (msg) => {
   });
 });
 
-// STEP 3: Handle inline keyboard callbacks
+// /canceledit command — cancel an active field-edit prompt
+bot.onText(/\/canceledit/, async (msg) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+  const pending = pendingFieldEdit.get(String(msg.chat.id));
+  if (pending) {
+    clearTimeout(pending.timeoutId);
+    pendingFieldEdit.delete(String(msg.chat.id));
+    await bot.sendMessage(chatId, '❌ Field edit cancelled.');
+  } else {
+    await bot.sendMessage(chatId, 'No active field edit to cancel.');
+  }
+});
+
+// Handle new value entered for a specific field (when pendingFieldEdit is active)
+bot.on('message', async (msg) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+  if (!msg.text) return;
+
+  // Ignore command messages
+  if (msg.text.startsWith('/')) return;
+
+  const pending = pendingFieldEdit.get(String(msg.chat.id));
+  if (!pending) return;
+
+  const { fieldName, oldValue, walletId, walletAddress, caseNumber, timeoutId } = pending;
+  clearTimeout(timeoutId);
+  pendingFieldEdit.delete(String(msg.chat.id));
+
+  const fieldLabel = CAMEL_TO_KEY[fieldName] || fieldName;
+
+  // Parse value: TOKENS and LINKS need to be split into arrays
+  let newValue;
+  if (fieldName === 'tokensCreated' || fieldName === 'crossProjectLinks') {
+    newValue = msg.text.split(',').map(s => s.trim()).filter(Boolean);
+  } else {
+    newValue = msg.text.trim();
+  }
+
+  // Validate the single field using validatePremiumFields
+  const errors = validatePremiumFields({ [fieldName]: newValue });
+  if (errors.length > 0) {
+    await bot.sendMessage(
+      chatId,
+      `❌ Invalid value for ${fieldLabel}:\n\n${errors.map(e => `• ${e}`).join('\n')}\n\nPlease use /edit_premium to try again. Use /premium_help for field rules.`
+    );
+    return;
+  }
+
+  const isSensitive = SENSITIVE_FIELDS.has(fieldName);
+  const confirmKey  = crypto.randomBytes(8).toString('hex');
+  pendingEditConfirm.set(confirmKey, {
+    walletId,
+    walletAddress,
+    caseNumber,
+    fieldName,
+    oldValue,
+    newValue
+  });
+  setTimeout(() => pendingEditConfirm.delete(confirmKey), 5 * 60 * 1000);
+
+  const preview = buildDiffPreview(caseNumber, fieldLabel, oldValue, newValue, isSensitive);
+  await bot.sendMessage(chatId, preview, {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '✅ Confirm', callback_data: `confirmedit_${confirmKey}` },
+        { text: '❌ Cancel',  callback_data: `canceledit_${confirmKey}` }
+      ]]
+    }
+  });
+});
+
+// Handle NEW_VALUES: bulk replacement sent by admin during an edit session
+bot.on('message', async (msg) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+  if (!msg.text) return;
+
+  if (!msg.text.startsWith('NEW_VALUES:')) return;
+
+  // Fetch the most recently edited wallet by looking at pending edit session or last verified wallet
+  // Since the admin uses /edit_premium to establish context, we look at whether they are in the
+  // middle of a field edit or we need them to provide the case via /edit_premium first.
+  // For NEW_VALUES we require the admin has just run /edit_premium (stored in pendingBulkEdit source).
+  // We instead accept NEW_VALUES from any admin in the authorised chat and ask them to specify wallet.
+
+  const content = msg.text.slice('NEW_VALUES:'.length).trim();
+  if (!content) {
+    await bot.sendMessage(
+      chatId,
+      '❌ No values provided after NEW_VALUES:.\n\nFormat:\nNEW_VALUES:\nADD_LIQ: 45.2 SOL\nFUNDING: Mixer (Tornado)'
+    );
+    return;
+  }
+
+  // NEW_VALUES requires an active edit session started by /edit_premium.
+  // We look for any recently-active edit context stored in pendingFieldEdit,
+  // or if the admin just finished one. To avoid ambiguity, require:
+  //   NEW_VALUES: [caseNumber]\n<fields>  OR  NEW_VALUES: [walletAddress]\n<fields>
+  const lines         = content.split('\n');
+  const firstLine     = lines[0].trim();
+  const fieldContent  = lines.slice(1).join('\n');
+
+  let wallet;
+  if (/^\d+$/.test(firstLine)) {
+    wallet = await Wallet.findOne({ caseNumber: parseInt(firstLine, 10), status: 'verified' });
+  } else if (WALLET_ADDRESS_REGEX.test(firstLine)) {
+    wallet = await Wallet.findOne({ walletAddress: firstLine, status: 'verified' });
+  } else {
+    await bot.sendMessage(
+      chatId,
+      '❌ First line of NEW_VALUES: must be a case number or wallet address.\n\nFormat:\nNEW_VALUES: [caseNumber or walletAddress]\nADD_LIQ: 45.2 SOL\nFUNDING: Mixer (Tornado)'
+    );
+    return;
+  }
+
+  if (!wallet) {
+    await bot.sendMessage(chatId, '❌ No verified wallet found for that identifier.');
+    return;
+  }
+
+  if (!fieldContent.trim()) {
+    await bot.sendMessage(chatId, '❌ No field values found after the case identifier. Use /premium_help for format.');
+    return;
+  }
+
+  const parsed = parsePremiumInput(fieldContent);
+  const errors = validatePremiumFields(parsed);
+  if (errors.length > 0) {
+    await bot.sendMessage(
+      chatId,
+      `❌ Validation failed:\n\n${errors.map(e => `• ${e}`).join('\n')}\n\nUse /premium_help for field format.`
+    );
+    return;
+  }
+
+  if (Object.keys(parsed).length === 0) {
+    await bot.sendMessage(chatId, '❌ No recognised fields found. Use /premium_help for the correct format.');
+    return;
+  }
+
+  const currentData = wallet.premiumForensics ? wallet.premiumForensics.toObject() : {};
+  const preview     = buildBulkDiffPreview(wallet.caseNumber, wallet.walletAddress, currentData, parsed);
+  const confirmKey  = crypto.randomBytes(8).toString('hex');
+
+  pendingBulkEdit.set(confirmKey, {
+    walletId:      wallet._id,
+    walletAddress: wallet.walletAddress,
+    caseNumber:    wallet.caseNumber,
+    currentData,
+    parsed
+  });
+  setTimeout(() => pendingBulkEdit.delete(confirmKey), 5 * 60 * 1000);
+
+  await bot.sendMessage(chatId, preview, {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '✅ Confirm All', callback_data: `confirmbulkedit_${confirmKey}` },
+        { text: '❌ Cancel',      callback_data: `cancelbulkedit_${confirmKey}` }
+      ]]
+    }
+  });
+});
 bot.on('callback_query', async (query) => {
   // Only process callbacks from the authorized chat
   if (String(query.message?.chat?.id) !== String(chatId)) return;
 
-  const [action, id] = query.data.split('_');
+  // Use first-underscore split so compound callback data (e.g. editfield_fieldName_walletId)
+  // is correctly parsed regardless of underscores in later segments.
+  const firstUnderscore = query.data.indexOf('_');
+  const action = firstUnderscore >= 0 ? query.data.slice(0, firstUnderscore) : query.data;
+  const id     = firstUnderscore >= 0 ? query.data.slice(firstUnderscore + 1) : '';
 
   if (action === 'review') {
     const wallet = await Wallet.findById(id);
@@ -414,6 +663,186 @@ bot.on('callback_query', async (query) => {
     await bot.sendMessage(chatId,
       `📋 Case #${wallet.caseNumber} — Premium Forensics\n\nKirim dengan format:\n\nAddLiquidityValue:\nRemoveLiquidityValue:\nWalletFunding:\nTokensCreated:\nForensicNotes:\nCrossProjectLinks:\nWalletId: ${wallet._id}`
     );
+  }
+
+  // ── editfield: admin clicked ✏️ next to a specific field ─────────────────
+  if (action === 'editfield') {
+    // id = '<fieldName>_<walletId>'  (neither camelCase nor MongoDB ObjectId contain underscores)
+    const sepIdx    = id.indexOf('_');
+    const fieldName = id.slice(0, sepIdx);
+    const walletId  = id.slice(sepIdx + 1);
+
+    const wallet = await Wallet.findById(walletId);
+    if (!wallet) {
+      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+    }
+    if (wallet.status !== 'verified') {
+      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet is not verified.' });
+    }
+
+    const currentData = wallet.premiumForensics ? wallet.premiumForensics.toObject() : {};
+    const oldValue    = currentData[fieldName];
+    const fieldLabel  = CAMEL_TO_KEY[fieldName] || fieldName;
+
+    const fmt = (val) => {
+      if (val === undefined || val === null) return '(not set)';
+      return Array.isArray(val) ? val.join(', ') : String(val);
+    };
+
+    const timeoutId = setTimeout(
+      () => pendingFieldEdit.delete(String(chatId)),
+      10 * 60 * 1000
+    );
+    pendingFieldEdit.set(String(chatId), {
+      walletId:      wallet._id,
+      walletAddress: wallet.walletAddress,
+      caseNumber:    wallet.caseNumber,
+      fieldName,
+      oldValue,
+      timeoutId
+    });
+
+    await bot.answerCallbackQuery(query.id, { text: `Editing ${fieldLabel}…` });
+    await bot.sendMessage(
+      chatId,
+      `✏️ Enter new value for ${fieldLabel} (Case #${wallet.caseNumber}):\n\nCurrent: ${fmt(oldValue)}\n\nFor TOKENS and LINKS, send comma-separated Base58 addresses.\nSend /canceledit to cancel.`
+    );
+    return;
+  }
+
+  // ── confirmedit: admin confirmed a single-field diff ──────────────────────
+  if (action === 'confirmedit') {
+    const confirmData = pendingEditConfirm.get(id);
+    if (!confirmData) {
+      return bot.answerCallbackQuery(query.id, {
+        text: '❌ Confirmation expired. Use /edit_premium to start again.'
+      });
+    }
+    pendingEditConfirm.delete(id);
+
+    if (!checkAdminEditRateLimit(String(chatId))) {
+      await bot.answerCallbackQuery(query.id, { text: '🚫 Rate limit reached.' });
+      await bot.sendMessage(chatId, `🚫 Rate limit reached: max ${EDIT_RATE_LIMIT} edits per hour per admin. Please wait before making more changes.`);
+      return;
+    }
+
+    const wallet = await Wallet.findById(confirmData.walletId);
+    if (!wallet) {
+      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+    }
+    if (wallet.status !== 'verified') {
+      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet is no longer verified.' });
+    }
+
+    const beforeValues = {};
+    const afterValues  = {};
+    const update       = { updatedAt: new Date() };
+
+    beforeValues[confirmData.fieldName] = confirmData.oldValue;
+    afterValues[confirmData.fieldName]  = confirmData.newValue;
+    update[confirmData.fieldName]       = confirmData.newValue;
+
+    wallet.set('premiumForensics', Object.assign(
+      wallet.premiumForensics ? wallet.premiumForensics.toObject() : {},
+      update
+    ));
+    await wallet.save();
+
+    writeAdminAuditLog({
+      action:        'edit_premium',
+      updatedBy:     'telegram-admin',
+      timestamp:     new Date().toISOString(),
+      fieldsChanged: [confirmData.fieldName],
+      walletAddress: wallet.walletAddress,
+      beforeValues,
+      afterValues
+    });
+
+    await bot.answerCallbackQuery(query.id, { text: '✅ Updated!' });
+    await bot.sendMessage(
+      chatId,
+      `✅ ${CAMEL_TO_KEY[confirmData.fieldName] || confirmData.fieldName} updated for Case #${wallet.caseNumber}.`
+    );
+    return;
+  }
+
+  // ── canceledit: admin cancelled a single-field diff ───────────────────────
+  if (action === 'canceledit') {
+    pendingEditConfirm.delete(id);
+    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' });
+    await bot.sendMessage(chatId, '❌ Field edit cancelled.');
+    return;
+  }
+
+  // ── confirmbulkedit: admin confirmed a bulk (NEW_VALUES) update ───────────
+  if (action === 'confirmbulkedit') {
+    const bulkData = pendingBulkEdit.get(id);
+    if (!bulkData) {
+      return bot.answerCallbackQuery(query.id, {
+        text: '❌ Confirmation expired. Use /edit_premium and send NEW_VALUES: ... again.'
+      });
+    }
+    pendingBulkEdit.delete(id);
+
+    if (!checkAdminEditRateLimit(String(chatId))) {
+      await bot.answerCallbackQuery(query.id, { text: '🚫 Rate limit reached.' });
+      await bot.sendMessage(chatId, `🚫 Rate limit reached: max ${EDIT_RATE_LIMIT} edits per hour per admin.`);
+      return;
+    }
+
+    const wallet = await Wallet.findById(bulkData.walletId);
+    if (!wallet) {
+      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+    }
+    if (wallet.status !== 'verified') {
+      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet is no longer verified.' });
+    }
+
+    const { parsed, currentData } = bulkData;
+    const update        = { updatedAt: new Date() };
+    const fieldsChanged = [];
+    const beforeValues  = {};
+    const afterValues   = {};
+
+    for (const camelField of Object.keys(CAMEL_TO_KEY)) {
+      if (parsed[camelField] !== undefined) {
+        update[camelField]       = parsed[camelField];
+        beforeValues[camelField] = currentData[camelField];
+        afterValues[camelField]  = parsed[camelField];
+        fieldsChanged.push(camelField);
+      }
+    }
+
+    wallet.set('premiumForensics', Object.assign(
+      wallet.premiumForensics ? wallet.premiumForensics.toObject() : {},
+      update
+    ));
+    await wallet.save();
+
+    writeAdminAuditLog({
+      action:        'edit_premium_bulk',
+      updatedBy:     'telegram-admin',
+      timestamp:     new Date().toISOString(),
+      fieldsChanged,
+      walletAddress: wallet.walletAddress,
+      beforeValues,
+      afterValues
+    });
+
+    await bot.answerCallbackQuery(query.id, { text: '✅ Saved!' });
+    await bot.sendMessage(
+      chatId,
+      `✅ Bulk premium update saved for Case #${wallet.caseNumber}.\nFields updated: ${fieldsChanged.join(', ') || 'none'}`
+    );
+    return;
+  }
+
+  // ── cancelbulkedit: admin cancelled a bulk (NEW_VALUES) update ───────────
+  if (action === 'cancelbulkedit') {
+    pendingBulkEdit.delete(id);
+    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' });
+    await bot.sendMessage(chatId, '❌ Bulk edit cancelled.');
+    return;
   }
 });
 

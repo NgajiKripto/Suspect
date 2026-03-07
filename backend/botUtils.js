@@ -174,10 +174,138 @@ Field rules:
 All fields are optional. Only provided fields will be updated.
 Use /premium_help at any time to see this format again.`;
 
+/**
+ * Reverse of PREMIUM_INPUT_KEYS: camelCase field name → short display key.
+ *
+ * addLiquidityValue   → ADD_LIQ
+ * removeLiquidityValue → REM_LIQ
+ * walletFunding       → FUNDING
+ * tokensCreated       → TOKENS
+ * forensicNotes       → NOTES
+ * crossProjectLinks   → LINKS
+ */
+const CAMEL_TO_KEY = Object.fromEntries(
+  Object.entries(PREMIUM_INPUT_KEYS).map(([displayKey, camelField]) => [camelField, displayKey])
+);
+
+/**
+ * Set of camelCase field names that are considered sensitive and require
+ * extra re-confirmation before saving.
+ */
+const SENSITIVE_FIELDS = new Set(['walletFunding', 'crossProjectLinks']);
+
+/**
+ * Build a human-readable message showing the current premium forensic values
+ * for a wallet, with ✏️ indicators for each editable field.
+ *
+ * @param {number|string} caseNumber
+ * @param {string}        walletAddress
+ * @param {Object}        data  Current premiumForensics data
+ * @returns {string}
+ */
+function buildEditCurrentValues(caseNumber, walletAddress, data) {
+  const fmt = (val) => {
+    if (val === undefined || val === null) return '(not set)';
+    return Array.isArray(val) ? val.join(', ') : String(val);
+  };
+
+  return [
+    `📋 Current premium data for Case #${caseNumber}:`,
+    `Wallet: ${walletAddress}`,
+    '',
+    `ADD_LIQ: ${fmt(data.addLiquidityValue)} [✏️]`,
+    `REM_LIQ: ${fmt(data.removeLiquidityValue)} [✏️]`,
+    `FUNDING: ${fmt(data.walletFunding)} [✏️]`,
+    `TOKENS: ${fmt(data.tokensCreated)} [✏️]`,
+    `NOTES: ${fmt(data.forensicNotes)} [✏️]`,
+    `LINKS: ${fmt(data.crossProjectLinks)} [✏️]`,
+    '',
+    'Click ✏️ next to any field to update, or send NEW_VALUES: ... to replace all'
+  ].join('\n');
+}
+
+/**
+ * Build a diff preview message for a single-field change.
+ *
+ * @param {number|string} caseNumber
+ * @param {string}        fieldLabel  Short display key, e.g. 'FUNDING'
+ * @param {*}             oldValue    Current stored value
+ * @param {*}             newValue    Proposed new value
+ * @param {boolean}       [isSensitive=false]
+ * @returns {string}
+ */
+function buildDiffPreview(caseNumber, fieldLabel, oldValue, newValue, isSensitive = false) {
+  const fmt = (val) => {
+    if (val === undefined || val === null) return '(not set)';
+    return Array.isArray(val) ? val.join(', ') : String(val);
+  };
+
+  const lines = [
+    `🔄 Diff Preview — Case #${caseNumber}`,
+    '',
+    `Change ${fieldLabel}:`,
+    `  From: '${fmt(oldValue)}'`,
+    `  To:   '${fmt(newValue)}'`
+  ];
+
+  if (isSensitive) {
+    lines.push('', '⚠️  This is a sensitive field. Please confirm carefully.');
+  }
+
+  lines.push('', 'Confirm this change?');
+  return lines.join('\n');
+}
+
+/**
+ * Build a diff preview message for a bulk (multi-field) update.
+ * Only fields that actually differ from the current stored values are listed.
+ *
+ * @param {number|string} caseNumber
+ * @param {string}        walletAddress
+ * @param {Object}        currentData  Current premiumForensics values
+ * @param {Object}        newData      Parsed input from parsePremiumInput()
+ * @returns {string}
+ */
+function buildBulkDiffPreview(caseNumber, walletAddress, currentData, newData) {
+  const fmt = (val) => {
+    if (val === undefined || val === null) return '(not set)';
+    return Array.isArray(val) ? val.join(', ') : String(val);
+  };
+
+  const lines = [
+    `🔄 Bulk Update Preview — Case #${caseNumber}`,
+    `Wallet: ${walletAddress}`,
+    '',
+    'Changes:'
+  ];
+
+  let changeCount = 0;
+  for (const [camel, label] of Object.entries(CAMEL_TO_KEY)) {
+    if (newData[camel] !== undefined) {
+      const oldStr = fmt(currentData[camel]);
+      const newStr = fmt(newData[camel]);
+      lines.push(`  ${label}: '${oldStr}' → '${newStr}'`);
+      changeCount++;
+    }
+  }
+
+  if (changeCount === 0) {
+    lines.push('  (no recognised fields provided)');
+  }
+
+  lines.push('', 'Confirm all changes?');
+  return lines.join('\n');
+}
+
 module.exports = {
   parsePremiumInput,
   validatePremiumFields,
   buildPremiumPreview,
   PREMIUM_HELP_TEXT,
-  PREMIUM_INPUT_KEYS
+  PREMIUM_INPUT_KEYS,
+  CAMEL_TO_KEY,
+  SENSITIVE_FIELDS,
+  buildEditCurrentValues,
+  buildDiffPreview,
+  buildBulkDiffPreview
 };
