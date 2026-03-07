@@ -13,6 +13,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const Wallet = require('./models/wallet');
 const { verifyX402Payment } = require('./middleware/verifyX402Payment');
 const { requireAdminAuth } = require('./middleware/requireAdminAuth');
+const { writeAuditLog, hashIp, AUDIT_LOG_PATH } = require('./auditLog');
 const {
   parsePremiumInput,
   validatePremiumFields,
@@ -64,13 +65,6 @@ const adminPremiumRateLimit = rateLimit({
 // Validation patterns for premiumForensics fields
 const LIQUIDITY_VALUE_REGEX = /^\d+(\.\d+)?\s*(SOL|USDC|USD)?$/i;
 const HTML_TAG_REGEX = /<[^>]*>/;
-
-// Audit logger — writes only to admin_audit.log, never to console
-const AUDIT_LOG_PATH = path.join(__dirname, 'admin_audit.log');
-function writeAdminAuditLog(entry) {
-  const line = JSON.stringify(entry) + '\n';
-  fs.appendFile(AUDIT_LOG_PATH, line, () => { /* intentionally silent */ });
-}
 
 /**
  * ==========================
@@ -600,27 +594,31 @@ bot.on('callback_query', async (query) => {
     }
 
     const { parsed } = pendingData;
+    const existing = wallet.premiumForensics ? wallet.premiumForensics.toObject() : {};
     const update = { updatedAt: new Date() };
     const fieldsChanged = [];
+    const before = {};
+    const after  = {};
 
-    if (parsed.addLiquidityValue !== undefined)   { update.addLiquidityValue   = parsed.addLiquidityValue;   fieldsChanged.push('addLiquidityValue'); }
-    if (parsed.removeLiquidityValue !== undefined) { update.removeLiquidityValue = parsed.removeLiquidityValue; fieldsChanged.push('removeLiquidityValue'); }
-    if (parsed.walletFunding !== undefined)        { update.walletFunding        = parsed.walletFunding;        fieldsChanged.push('walletFunding'); }
-    if (parsed.tokensCreated !== undefined)        { update.tokensCreated        = parsed.tokensCreated;        fieldsChanged.push('tokensCreated'); }
-    if (parsed.forensicNotes !== undefined)        { update.forensicNotes        = parsed.forensicNotes;        fieldsChanged.push('forensicNotes'); }
-    if (parsed.crossProjectLinks !== undefined)    { update.crossProjectLinks    = parsed.crossProjectLinks;    fieldsChanged.push('crossProjectLinks'); }
+    if (parsed.addLiquidityValue !== undefined)   { before.addLiquidityValue   = existing.addLiquidityValue   ?? null; after.addLiquidityValue   = parsed.addLiquidityValue;   update.addLiquidityValue   = parsed.addLiquidityValue;   fieldsChanged.push('addLiquidityValue'); }
+    if (parsed.removeLiquidityValue !== undefined) { before.removeLiquidityValue = existing.removeLiquidityValue ?? null; after.removeLiquidityValue = parsed.removeLiquidityValue; update.removeLiquidityValue = parsed.removeLiquidityValue; fieldsChanged.push('removeLiquidityValue'); }
+    if (parsed.walletFunding !== undefined)        { before.walletFunding        = existing.walletFunding        ?? null; after.walletFunding        = parsed.walletFunding;        update.walletFunding        = parsed.walletFunding;        fieldsChanged.push('walletFunding'); }
+    if (parsed.tokensCreated !== undefined)        { before.tokensCreated        = existing.tokensCreated        ?? [];   after.tokensCreated        = parsed.tokensCreated;        update.tokensCreated        = parsed.tokensCreated;        fieldsChanged.push('tokensCreated'); }
+    if (parsed.forensicNotes !== undefined)        { before.forensicNotes        = existing.forensicNotes        ?? null; after.forensicNotes        = parsed.forensicNotes;        update.forensicNotes        = parsed.forensicNotes;        fieldsChanged.push('forensicNotes'); }
+    if (parsed.crossProjectLinks !== undefined)    { before.crossProjectLinks    = existing.crossProjectLinks    ?? [];   after.crossProjectLinks    = parsed.crossProjectLinks;    update.crossProjectLinks    = parsed.crossProjectLinks;    fieldsChanged.push('crossProjectLinks'); }
 
-    wallet.set('premiumForensics', Object.assign(
-      wallet.premiumForensics ? wallet.premiumForensics.toObject() : {},
-      update
-    ));
+    wallet.set('premiumForensics', Object.assign({}, existing, update));
     await wallet.save();
 
-    writeAdminAuditLog({
-      updatedBy:     'telegram-admin',
-      timestamp:     new Date().toISOString(),
+    writeAuditLog({
+      timestamp:  new Date().toISOString(),
+      action:     'premium_update',
+      walletAddress: wallet.walletAddress,
+      caseNumber: wallet.caseNumber,
+      changedBy:  { source: 'telegram', identifier: `chat.id:${query.from.id}` },
       fieldsChanged,
-      walletAddress: wallet.walletAddress
+      before,
+      after
     });
 
     await bot.answerCallbackQuery(query.id, { text: '✅ Saved!' });
@@ -755,14 +753,15 @@ bot.on('callback_query', async (query) => {
     ));
     await wallet.save();
 
-    writeAdminAuditLog({
-      action:        'edit_premium',
-      updatedBy:     'telegram-admin',
+    writeAuditLog({
       timestamp:     new Date().toISOString(),
-      fieldsChanged: [confirmData.fieldName],
+      action:        'premium_update',
       walletAddress: wallet.walletAddress,
-      beforeValues,
-      afterValues
+      caseNumber:    wallet.caseNumber,
+      changedBy:     { source: 'telegram', identifier: `chat.id:${query.from.id}` },
+      fieldsChanged: [confirmData.fieldName],
+      before:        beforeValues,
+      after:         afterValues
     });
 
     await bot.answerCallbackQuery(query.id, { text: '✅ Updated!' });
@@ -826,14 +825,15 @@ bot.on('callback_query', async (query) => {
     ));
     await wallet.save();
 
-    writeAdminAuditLog({
-      action:        'edit_premium_bulk',
-      updatedBy:     'telegram-admin',
+    writeAuditLog({
       timestamp:     new Date().toISOString(),
-      fieldsChanged,
+      action:        'premium_update',
       walletAddress: wallet.walletAddress,
-      beforeValues,
-      afterValues
+      caseNumber:    wallet.caseNumber,
+      changedBy:     { source: 'telegram', identifier: `chat.id:${query.from.id}` },
+      fieldsChanged,
+      before:        beforeValues,
+      after:         afterValues
     });
 
     await bot.answerCallbackQuery(query.id, { text: '✅ Saved!' });
@@ -1166,39 +1166,79 @@ app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, requireA
     const wallet = await Wallet.findOne({ walletAddress: req.params.address });
     if (!wallet) return res.status(404).json({ success: false, message: 'Not found' });
 
+    const existing = wallet.premiumForensics ? wallet.premiumForensics.toObject() : {};
     const fieldsChanged = [];
     const update = { updatedAt: new Date() };
+    const before = {};
+    const after  = {};
 
-    if (addLiquidityValue !== undefined)   { update.addLiquidityValue   = addLiquidityValue;   fieldsChanged.push('addLiquidityValue'); }
-    if (removeLiquidityValue !== undefined) { update.removeLiquidityValue = removeLiquidityValue; fieldsChanged.push('removeLiquidityValue'); }
-    if (walletFunding !== undefined)        { update.walletFunding        = walletFunding;        fieldsChanged.push('walletFunding'); }
-    if (tokensCreated !== undefined)        { update.tokensCreated        = tokensCreated;        fieldsChanged.push('tokensCreated'); }
-    if (forensicNotes !== undefined)        { update.forensicNotes        = forensicNotes;        fieldsChanged.push('forensicNotes'); }
-    if (crossProjectLinks !== undefined)    { update.crossProjectLinks    = crossProjectLinks;    fieldsChanged.push('crossProjectLinks'); }
+    if (addLiquidityValue !== undefined)   { before.addLiquidityValue   = existing.addLiquidityValue   ?? null; after.addLiquidityValue   = addLiquidityValue;   update.addLiquidityValue   = addLiquidityValue;   fieldsChanged.push('addLiquidityValue'); }
+    if (removeLiquidityValue !== undefined) { before.removeLiquidityValue = existing.removeLiquidityValue ?? null; after.removeLiquidityValue = removeLiquidityValue; update.removeLiquidityValue = removeLiquidityValue; fieldsChanged.push('removeLiquidityValue'); }
+    if (walletFunding !== undefined)        { before.walletFunding        = existing.walletFunding        ?? null; after.walletFunding        = walletFunding;        update.walletFunding        = walletFunding;        fieldsChanged.push('walletFunding'); }
+    if (tokensCreated !== undefined)        { before.tokensCreated        = existing.tokensCreated        ?? [];   after.tokensCreated        = tokensCreated;        update.tokensCreated        = tokensCreated;        fieldsChanged.push('tokensCreated'); }
+    if (forensicNotes !== undefined)        { before.forensicNotes        = existing.forensicNotes        ?? null; after.forensicNotes        = forensicNotes;        update.forensicNotes        = forensicNotes;        fieldsChanged.push('forensicNotes'); }
+    if (crossProjectLinks !== undefined)    { before.crossProjectLinks    = existing.crossProjectLinks    ?? [];   after.crossProjectLinks    = crossProjectLinks;    update.crossProjectLinks    = crossProjectLinks;    fieldsChanged.push('crossProjectLinks'); }
 
-    wallet.set('premiumForensics', Object.assign(
-      wallet.premiumForensics ? wallet.premiumForensics.toObject() : {},
-      update
-    ));
+    wallet.set('premiumForensics', Object.assign({}, existing, update));
     await wallet.save();
 
-    const auditEntry = {
-      updatedBy: 'admin',
-      timestamp: new Date().toISOString(),
+    const timestamp = new Date().toISOString();
+    writeAuditLog({
+      timestamp,
+      action:        'premium_update',
+      walletAddress: req.params.address,
+      caseNumber:    wallet.caseNumber,
+      changedBy:     { source: 'api', identifier: `wallet:${req.adminAuth.payerAddress}` },
       fieldsChanged,
-      walletAddress: req.params.address
-    };
-    writeAdminAuditLog(auditEntry);
+      before,
+      after,
+      ipHash:        hashIp(req.ip)
+    });
 
     return res.json({
       success: true,
       premiumForensics: wallet.premiumForensics,
       auditLog: {
-        updatedBy: auditEntry.updatedBy,
-        timestamp: auditEntry.timestamp,
-        fieldsChanged: auditEntry.fieldsChanged
+        updatedBy: 'admin',
+        timestamp,
+        fieldsChanged
       }
     });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ── GET /api/admin/audit — return last 50 audit entries for a wallet ──────────
+app.get('/api/admin/audit', requireAdminAuth('api'), (req, res) => {
+  const { wallet } = req.query;
+
+  if (!wallet || !WALLET_ADDRESS_REGEX.test(wallet)) {
+    return res.status(400).json({ success: false, message: 'Invalid or missing wallet query parameter' });
+  }
+
+  try {
+    let content;
+    try {
+      content = fs.readFileSync(AUDIT_LOG_PATH, 'utf8');
+    } catch (readErr) {
+      if (readErr.code === 'ENOENT') return res.json({ success: true, entries: [] });
+      throw readErr;
+    }
+
+    const entries = content
+      .split('\n')
+      .filter(Boolean)
+      .map(line => {
+        try { return JSON.parse(line); } catch (e) {
+          process.stderr.write(`[audit] invalid JSON line skipped: ${e.message}\n`);
+          return null;
+        }
+      })
+      .filter(entry => entry !== null && entry.walletAddress === wallet)
+      .slice(-50);
+
+    return res.json({ success: true, entries });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Internal server error' });
   }

@@ -30,6 +30,7 @@ const {
   buildBulkDiffPreview
 } = require('../botUtils');
 const { requireAdminAuth } = require('../middleware/requireAdminAuth');
+const { writeAuditLog, hashIp, AUDIT_LOG_PATH } = require('../auditLog');
 
 // ─── Shared regex (mirrors server.js) ────────────────────────────────────────
 const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -185,6 +186,9 @@ function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecre
     res.json({ success: true, premiumForensics: { addLiquidityValue, removeLiquidityValue, walletFunding, tokensCreated, forensicNotes, crossProjectLinks, updatedAt: new Date().toISOString() } });
   });
 
+  // In-memory audit log — populated by PATCH successes, queried by GET /api/admin/audit
+  const inMemoryAuditLog = [];
+
   // PATCH admin endpoint — partial update of premiumForensics (mirrors production)
   app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, (req, res) => {
     // Option 1: Telegram admin token
@@ -253,11 +257,63 @@ function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecre
       crossProjectLinks !== undefined    ? 'crossProjectLinks'    : null
     ].filter(Boolean);
 
+    const timestamp = new Date().toISOString();
+    inMemoryAuditLog.push({
+      timestamp,
+      action:        'premium_update',
+      walletAddress: req.params.address,
+      caseNumber:    1,
+      changedBy:     { source: 'api', identifier: 'wallet:testadmin' },
+      fieldsChanged,
+      before: {},
+      after:  { addLiquidityValue, removeLiquidityValue, walletFunding, tokensCreated, forensicNotes, crossProjectLinks }
+    });
+
     res.json({
       success: true,
-      premiumForensics: { addLiquidityValue, removeLiquidityValue, walletFunding, tokensCreated, forensicNotes, crossProjectLinks, updatedAt: new Date().toISOString() },
-      auditLog: { updatedBy: 'admin', timestamp: new Date().toISOString(), fieldsChanged }
+      premiumForensics: { addLiquidityValue, removeLiquidityValue, walletFunding, tokensCreated, forensicNotes, crossProjectLinks, updatedAt: timestamp },
+      auditLog: { updatedBy: 'admin', timestamp, fieldsChanged }
     });
+  });
+
+  // GET admin audit log — returns last 50 entries for a wallet (mirrors production)
+  app.get('/api/admin/audit', (req, res) => {
+    let authorized = false;
+    const tgToken = req.headers['x-telegram-admin-token'];
+    if (tgToken && telegramAdminToken) {
+      try {
+        const aBuf = Buffer.from(tgToken);
+        const bBuf = Buffer.from(telegramAdminToken);
+        if (aBuf.length === bBuf.length && crypto.timingSafeEqual(aBuf, bBuf)) authorized = true;
+      } catch { /* fall through */ }
+    }
+    if (!authorized) {
+      const x402 = req.headers['x402-payment'];
+      const admin = req.headers['x-admin-token'];
+      if (x402 && paymentSecret && admin && adminSecret) {
+        try {
+          const paidBuf = Buffer.from(x402);
+          const validPaidBuf = Buffer.from(paymentSecret);
+          const adminBuf = Buffer.from(admin);
+          const validAdminBuf = Buffer.from(adminSecret);
+          const x402Valid = paidBuf.length === validPaidBuf.length && crypto.timingSafeEqual(paidBuf, validPaidBuf);
+          const adminValid = adminBuf.length === validAdminBuf.length && crypto.timingSafeEqual(adminBuf, validAdminBuf);
+          if (x402Valid && adminValid) authorized = true;
+        } catch { /* fall through */ }
+      }
+    }
+    if (!authorized) return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    const { wallet } = req.query;
+    if (!wallet || !WALLET_ADDRESS_REGEX.test(wallet)) {
+      return res.status(400).json({ success: false, message: 'Invalid or missing wallet query parameter' });
+    }
+
+    const entries = inMemoryAuditLog
+      .filter(e => e.walletAddress === wallet)
+      .slice(-50);
+
+    return res.json({ success: true, entries });
   });
 
   // Submit report — with strict rate limit
@@ -1823,5 +1879,155 @@ describe('26. requireAdminAuth — Telegram handler', () => {
 
   test('returns false for null input', () => {
     expect(getHandler()(null)).toBe(false);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 27. GET /api/admin/audit — Admin Audit Log Endpoint
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('27. GET /api/admin/audit — Admin Audit Log Endpoint', () => {
+  const tgToken = 'tg-audit-view-token';
+  const app = buildTestApp({ telegramAdminToken: tgToken });
+  const auth = { 'x-telegram-admin-token': tgToken };
+
+  test('returns 403 without admin credentials', async () => {
+    const res = await request(app).get(`/api/admin/audit?wallet=${VALID_ADDRESS}`);
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+  });
+
+  test('returns 400 when wallet query param is missing', async () => {
+    const res = await request(app).get('/api/admin/audit').set(auth);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/wallet/i);
+  });
+
+  test('returns 400 when wallet query param is invalid', async () => {
+    const res = await request(app).get('/api/admin/audit?wallet=notvalid').set(auth);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  test('returns 400 for wallet with Base58-invalid characters', async () => {
+    const res = await request(app).get('/api/admin/audit?wallet=0OIl000000000000000000000000000000000000000').set(auth);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  test('returns 200 with empty entries array when no entries exist for wallet', async () => {
+    const res = await request(app)
+      .get(`/api/admin/audit?wallet=${VALID_ADDRESS}`)
+      .set(auth);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(Array.isArray(res.body.entries)).toBe(true);
+  });
+
+  test('returns entries with correct shape after PATCH creates one', async () => {
+    // Perform a PATCH to populate the in-memory audit log
+    await request(app)
+      .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+      .set(auth)
+      .send({ forensicNotes: 'audit trail test' });
+
+    const res = await request(app)
+      .get(`/api/admin/audit?wallet=${VALID_ADDRESS}`)
+      .set(auth);
+    expect(res.status).toBe(200);
+    expect(res.body.entries.length).toBeGreaterThan(0);
+
+    const entry = res.body.entries[res.body.entries.length - 1];
+    expect(entry).toHaveProperty('timestamp');
+    expect(entry).toHaveProperty('action', 'premium_update');
+    expect(entry).toHaveProperty('walletAddress', VALID_ADDRESS);
+    expect(entry).toHaveProperty('fieldsChanged');
+    expect(Array.isArray(entry.fieldsChanged)).toBe(true);
+    expect(entry).toHaveProperty('changedBy');
+    expect(entry.changedBy).toHaveProperty('source');
+    expect(entry.changedBy).toHaveProperty('identifier');
+    expect(entry).toHaveProperty('before');
+    expect(entry).toHaveProperty('after');
+  });
+
+  test('does not return entries for a different wallet', async () => {
+    // VALID_TOKEN_ADDR is a different valid Base58 address from VALID_ADDRESS
+    const res = await request(app)
+      .get(`/api/admin/audit?wallet=${VALID_TOKEN_ADDR}`)
+      .set(auth);
+    expect(res.status).toBe(200);
+    // No entries for VALID_TOKEN_ADDR should contain a different wallet address
+    expect(res.body.entries.filter(e => e.walletAddress !== VALID_TOKEN_ADDR)).toHaveLength(0);
+  });
+
+  test('returns at most 50 entries', async () => {
+    // Build an app and flood it with 60 PATCH calls
+    const floodApp = buildTestApp({ telegramAdminToken: tgToken, patchAdminMax: 1000 });
+    for (let i = 0; i < 60; i++) {
+      await request(floodApp)
+        .patch(`/api/admin/wallets/${VALID_ADDRESS}/premium`)
+        .set(auth)
+        .send({ forensicNotes: `entry ${i}` });
+    }
+    const res = await request(floodApp)
+      .get(`/api/admin/audit?wallet=${VALID_ADDRESS}`)
+      .set(auth);
+    expect(res.status).toBe(200);
+    expect(res.body.entries.length).toBeLessThanOrEqual(50);
+  });
+
+  test('returns 403 with wrong telegram token', async () => {
+    const res = await request(app)
+      .get(`/api/admin/audit?wallet=${VALID_ADDRESS}`)
+      .set('x-telegram-admin-token', 'wrong-token');
+    expect(res.status).toBe(403);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 28. auditLog utility — hashIp and writeAuditLog
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('28. auditLog utility — hashIp and writeAuditLog', () => {
+  test('hashIp returns a sha256-prefixed 64-char hex string for a valid IP', () => {
+    const result = hashIp('127.0.0.1');
+    expect(result).toMatch(/^sha256-[a-f0-9]{64}$/);
+  });
+
+  test('hashIp returns undefined for null', () => {
+    expect(hashIp(null)).toBeUndefined();
+  });
+
+  test('hashIp returns undefined for empty string', () => {
+    expect(hashIp('')).toBeUndefined();
+  });
+
+  test('hashIp returns undefined for undefined', () => {
+    expect(hashIp(undefined)).toBeUndefined();
+  });
+
+  test('hashIp produces different hashes for different IPs', () => {
+    expect(hashIp('1.2.3.4')).not.toBe(hashIp('4.3.2.1'));
+  });
+
+  test('hashIp is deterministic (same input → same output)', () => {
+    expect(hashIp('192.168.1.1')).toBe(hashIp('192.168.1.1'));
+  });
+
+  test('AUDIT_LOG_PATH ends with logs/admin_audit.log', () => {
+    expect(AUDIT_LOG_PATH).toMatch(/logs[/\\]admin_audit\.log$/);
+  });
+
+  test('writeAuditLog does not throw for a valid entry', () => {
+    expect(() => writeAuditLog({
+      timestamp:     new Date().toISOString(),
+      action:        'premium_update',
+      walletAddress: VALID_ADDRESS
+    })).not.toThrow();
+  });
+
+  test('writeAuditLog does not throw for an empty object', () => {
+    expect(() => writeAuditLog({})).not.toThrow();
   });
 });

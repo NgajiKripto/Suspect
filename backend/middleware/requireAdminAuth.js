@@ -28,22 +28,15 @@
  */
 
 const crypto = require('crypto');
-const fs     = require('fs');
-const path   = require('path');
 const jwt    = require('jsonwebtoken');
 const { getJwks } = require('./verifyX402Payment');
-
-// ── Audit log (same file used by server.js writeAdminAuditLog) ────────────────
-const AUDIT_LOG_PATH = path.join(__dirname, '..', 'admin_audit.log');
+const { writeAuditLog } = require('../auditLog');
 
 function logUnauthorized(entry) {
-  const line = JSON.stringify({ ...entry, event: 'unauthorized_admin_attempt' }) + '\n';
-  fs.appendFile(AUDIT_LOG_PATH, line, (err) => {
-    if (err) process.stderr.write(`[requireAdminAuth] audit log write failed: ${err.message}\n`);
-  });
+  writeAuditLog({ ...entry, event: 'unauthorized_admin_attempt' });
 }
 
-// ── requireAdminAuth factory ───────────────────────────────────────────────────
+// ── requireAdminAuth factory ──────────────────────────────────────────────────
 function requireAdminAuth(source = 'api') {
 
   // ── API: Express middleware ────────────────────────────────────────────────
