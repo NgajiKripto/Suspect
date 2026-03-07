@@ -29,6 +29,7 @@ const {
   buildDiffPreview,
   buildBulkDiffPreview
 } = require('../botUtils');
+const { requireAdminAuth } = require('../middleware/requireAdminAuth');
 
 // ─── Shared regex (mirrors server.js) ────────────────────────────────────────
 const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -1612,5 +1613,215 @@ describe('24. Bot — buildBulkDiffPreview', () => {
     const newVal = ['addr1111111111111111111111111111', 'addr2222222222222222222222222222'];
     const msg    = buildBulkDiffPreview(1, WALLET, {}, { tokensCreated: newVal });
     expect(msg).toContain('addr1111111111111111111111111111, addr2222222222222222222222222222');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 25. requireAdminAuth — API middleware
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('25. requireAdminAuth — API middleware', () => {
+  // Re-use the shared ES256 key pair (TEST_PRIV_KEY / TEST_JWK / signTestToken)
+  // and the injectTestCaches() helper defined at module level above.
+  const ADMIN_WALLET = 'AdminWallet111111111111111111111111111111111'; // 44 chars
+  const OTHER_WALLET = 'OtherWallet11111111111111111111111111111111';  // not in list
+
+  function buildApp() {
+    const app = express();
+    app.use(express.json());
+    app.get('/admin/test', requireAdminAuth('api'), (req, res) => {
+      res.json({ success: true, adminAuth: req.adminAuth });
+    });
+    return app;
+  }
+
+  function signAdminToken(payerOverride) {
+    return signTestToken({
+      amount:   0.11,
+      currency: 'USD',
+      payer:    payerOverride !== undefined ? payerOverride : ADMIN_WALLET
+    });
+  }
+
+  beforeAll(() => {
+    injectTestCaches();
+    process.env.ADMIN_WALLET_ADDRESSES = ADMIN_WALLET;
+  });
+
+  afterAll(() => {
+    delete process.env.ADMIN_WALLET_ADDRESSES;
+    _caches.jwks  = { keys: null, fetchedAt: 0 };
+    _caches.price = { priceUSD: null, fetchedAt: 0 };
+  });
+
+  test('returns 403 when x402-payment header is absent', async () => {
+    const res = await request(buildApp()).get('/admin/test');
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+  });
+
+  test('returns 403 for a non-JWT string in x402-payment', async () => {
+    const res = await request(buildApp())
+      .get('/admin/test')
+      .set('x402-payment', 'not-a-valid-jwt');
+    expect(res.status).toBe(403);
+  });
+
+  test('returns 403 when JWT kid is not in the JWKS', async () => {
+    const token = signTestToken(
+      { amount: 0.11, currency: 'USD', payer: ADMIN_WALLET },
+      { kid: 'unknown-kid' }
+    );
+    const res = await request(buildApp())
+      .get('/admin/test')
+      .set('x402-payment', token);
+    expect(res.status).toBe(403);
+  });
+
+  test('returns 403 when JWT payer address is not in ADMIN_WALLET_ADDRESSES', async () => {
+    const token = signAdminToken(OTHER_WALLET);
+    const res = await request(buildApp())
+      .get('/admin/test')
+      .set('x402-payment', token);
+    expect(res.status).toBe(403);
+  });
+
+  test('returns 403 when ADMIN_WALLET_ADDRESSES is empty', async () => {
+    const saved = process.env.ADMIN_WALLET_ADDRESSES;
+    process.env.ADMIN_WALLET_ADDRESSES = '';
+    const token = signAdminToken();
+    const res = await request(buildApp())
+      .get('/admin/test')
+      .set('x402-payment', token);
+    expect(res.status).toBe(403);
+    process.env.ADMIN_WALLET_ADDRESSES = saved;
+  });
+
+  test('returns 403 when JWT payer claim is missing', async () => {
+    const token = signTestToken({ amount: 0.11, currency: 'USD' });
+    const res = await request(buildApp())
+      .get('/admin/test')
+      .set('x402-payment', token);
+    expect(res.status).toBe(403);
+  });
+
+  test('returns 200 and sets req.adminAuth when payer is in whitelist', async () => {
+    const token = signAdminToken();
+    const res = await request(buildApp())
+      .get('/admin/test')
+      .set('x402-payment', token);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.adminAuth).toEqual({ source: 'api', payerAddress: ADMIN_WALLET });
+  });
+
+  test('accepts a second admin wallet in a comma-separated whitelist', async () => {
+    process.env.ADMIN_WALLET_ADDRESSES = OTHER_WALLET + ',' + ADMIN_WALLET;
+    const token = signAdminToken();
+    const res = await request(buildApp())
+      .get('/admin/test')
+      .set('x402-payment', token);
+    expect(res.status).toBe(200);
+    process.env.ADMIN_WALLET_ADDRESSES = ADMIN_WALLET;
+  });
+
+  test('trims spaces around addresses in ADMIN_WALLET_ADDRESSES', async () => {
+    process.env.ADMIN_WALLET_ADDRESSES = '  ' + ADMIN_WALLET + '  ';
+    const token = signAdminToken();
+    const res = await request(buildApp())
+      .get('/admin/test')
+      .set('x402-payment', token);
+    expect(res.status).toBe(200);
+    process.env.ADMIN_WALLET_ADDRESSES = ADMIN_WALLET;
+  });
+
+  test('throws for an invalid source argument', () => {
+    expect(() => requireAdminAuth('ftp')).toThrow(/invalid source/i);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 26. requireAdminAuth — Telegram handler
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('26. requireAdminAuth — Telegram handler', () => {
+  const ADMIN_CHAT_ID = '123456789';
+  const ADMIN_USER_ID = '111111111';
+  const OTHER_CHAT_ID = '987654321';
+  const OTHER_USER_ID = '999999999';
+
+  // Obtain a fresh handler so each test picks up the current env
+  function getHandler() {
+    return requireAdminAuth('telegram');
+  }
+
+  function makeMessage(chatId = ADMIN_CHAT_ID, fromId = ADMIN_USER_ID) {
+    return { chat: { id: chatId }, from: { id: fromId }, text: '/command' };
+  }
+
+  function makeCallbackQuery(chatId = ADMIN_CHAT_ID, fromId = ADMIN_USER_ID) {
+    return { message: { chat: { id: chatId } }, from: { id: fromId }, data: 'action_walletid' };
+  }
+
+  beforeEach(() => {
+    process.env.TELEGRAM_ADMIN_CHAT_ID  = ADMIN_CHAT_ID;
+    process.env.TELEGRAM_ADMIN_USER_IDS = ADMIN_USER_ID;
+  });
+
+  afterEach(() => {
+    delete process.env.TELEGRAM_ADMIN_CHAT_ID;
+    delete process.env.TELEGRAM_ADMIN_USER_IDS;
+    delete process.env.TELEGRAM_CHAT_ID;
+  });
+
+  test('returns true for an authorized Message (correct chat.id and from.id)', () => {
+    expect(getHandler()(makeMessage())).toBe(true);
+  });
+
+  test('returns true for an authorized CallbackQuery (correct message.chat.id and from.id)', () => {
+    expect(getHandler()(makeCallbackQuery())).toBe(true);
+  });
+
+  test('returns false when chat.id does not match TELEGRAM_ADMIN_CHAT_ID', () => {
+    expect(getHandler()(makeMessage(OTHER_CHAT_ID, ADMIN_USER_ID))).toBe(false);
+  });
+
+  test('returns false when from.id is not in TELEGRAM_ADMIN_USER_IDS', () => {
+    expect(getHandler()(makeMessage(ADMIN_CHAT_ID, OTHER_USER_ID))).toBe(false);
+  });
+
+  test('returns true when TELEGRAM_ADMIN_USER_IDS is empty (no user whitelist)', () => {
+    process.env.TELEGRAM_ADMIN_USER_IDS = '';
+    expect(getHandler()(makeMessage())).toBe(true);
+  });
+
+  test('returns false when TELEGRAM_ADMIN_CHAT_ID is not configured', () => {
+    delete process.env.TELEGRAM_ADMIN_CHAT_ID;
+    expect(getHandler()(makeMessage())).toBe(false);
+  });
+
+  test('falls back to TELEGRAM_CHAT_ID when TELEGRAM_ADMIN_CHAT_ID is absent', () => {
+    delete process.env.TELEGRAM_ADMIN_CHAT_ID;
+    process.env.TELEGRAM_CHAT_ID = ADMIN_CHAT_ID;
+    expect(getHandler()(makeMessage())).toBe(true);
+  });
+
+  test('accepts any user ID from a multi-entry TELEGRAM_ADMIN_USER_IDS', () => {
+    process.env.TELEGRAM_ADMIN_USER_IDS = OTHER_USER_ID + ',' + ADMIN_USER_ID;
+    expect(getHandler()(makeMessage(ADMIN_CHAT_ID, OTHER_USER_ID))).toBe(true);
+    expect(getHandler()(makeMessage(ADMIN_CHAT_ID, ADMIN_USER_ID))).toBe(true);
+  });
+
+  test('trims spaces around IDs in TELEGRAM_ADMIN_USER_IDS', () => {
+    process.env.TELEGRAM_ADMIN_USER_IDS = '  ' + ADMIN_USER_ID + '  ';
+    expect(getHandler()(makeMessage())).toBe(true);
+  });
+
+  test('returns false when CallbackQuery chat.id does not match', () => {
+    expect(getHandler()(makeCallbackQuery(OTHER_CHAT_ID, ADMIN_USER_ID))).toBe(false);
+  });
+
+  test('returns false for null input', () => {
+    expect(getHandler()(null)).toBe(false);
   });
 });

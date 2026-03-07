@@ -12,6 +12,7 @@ const TelegramBot = require('node-telegram-bot-api');
 
 const Wallet = require('./models/wallet');
 const { verifyX402Payment } = require('./middleware/verifyX402Payment');
+const { requireAdminAuth } = require('./middleware/requireAdminAuth');
 const {
   parsePremiumInput,
   validatePremiumFields,
@@ -90,6 +91,9 @@ mongoose.connect(process.env.MONGODB_URI)
  */
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const chatId = process.env.TELEGRAM_CHAT_ID;
+
+// Reusable admin authorization handler for Telegram callbacks and messages
+const telegramAdminAuth = requireAdminAuth('telegram');
 
 // Tracks which wallet an admin is currently entering premium data for (chatId → pending entry)
 const pendingPremiumEntry = new Map();
@@ -507,8 +511,11 @@ bot.on('message', async (msg) => {
   });
 });
 bot.on('callback_query', async (query) => {
-  // Only process callbacks from the authorized chat
-  if (String(query.message?.chat?.id) !== String(chatId)) return;
+  // Verify the callback originates from an authorized admin chat and user
+  if (!telegramAdminAuth(query)) {
+    await bot.answerCallbackQuery(query.id, { text: '⛔ Unauthorized.' });
+    return;
+  }
 
   // Use first-underscore split so compound callback data (e.g. editfield_fieldName_walletId)
   // is correctly parsed regardless of underscores in later segments.
@@ -1087,52 +1094,10 @@ app.post('/api/admin/wallets/:address/premium-forensics', async (req, res) => {
 
 /**
  * ADMIN PATCH ENDPOINT — Partial update of premiumForensics
- * Accepts: TELEGRAM_ADMIN_TOKEN header OR x402-payment + x-admin-token (admin role)
- * Rate limited: 20 updates per hour per admin token
+ * Authorization: x402-payment JWT must be valid and payer must be in ADMIN_WALLET_ADDRESSES.
+ * Rate limited: 20 updates per hour per admin token.
  */
-app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, async (req, res) => {
-  // ── Authorization ──────────────────────────────────────────────────────────
-  let authorized = false;
-
-  // Option 1: Telegram admin token
-  const telegramAdminToken = req.headers['x-telegram-admin-token'];
-  const validTelegramToken = process.env.TELEGRAM_ADMIN_TOKEN;
-  if (telegramAdminToken && validTelegramToken) {
-    try {
-      const aBuf = Buffer.from(telegramAdminToken);
-      const bBuf = Buffer.from(validTelegramToken);
-      if (aBuf.length === bBuf.length && crypto.timingSafeEqual(aBuf, bBuf)) {
-        authorized = true;
-      }
-    } catch { /* fall through */ }
-  }
-
-  // Option 2: Valid x402 payment header AND valid admin token (admin role check)
-  if (!authorized) {
-    const x402Payment = req.headers['x402-payment'];
-    const validX402 = process.env.X402_PAYMENT_SECRET;
-    const adminToken = req.headers['x-admin-token'];
-    const validAdminSecret = process.env.ADMIN_SECRET;
-
-    if (x402Payment && validX402 && adminToken && validAdminSecret) {
-      try {
-        const paidBuf = Buffer.from(x402Payment);
-        const validPaidBuf = Buffer.from(validX402);
-        const adminBuf = Buffer.from(adminToken);
-        const validAdminBuf = Buffer.from(validAdminSecret);
-        const x402Valid = paidBuf.length === validPaidBuf.length &&
-          crypto.timingSafeEqual(paidBuf, validPaidBuf);
-        const adminValid = adminBuf.length === validAdminBuf.length &&
-          crypto.timingSafeEqual(adminBuf, validAdminBuf);
-        if (x402Valid && adminValid) authorized = true;
-      } catch { /* fall through */ }
-    }
-  }
-
-  if (!authorized) {
-    return res.status(403).json({ success: false, message: 'Forbidden' });
-  }
-
+app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, requireAdminAuth('api'), async (req, res) => {
   // ── Destructure only the 6 allowed premiumForensics fields ─────────────────
   const {
     addLiquidityValue,
