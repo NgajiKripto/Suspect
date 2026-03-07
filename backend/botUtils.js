@@ -1,0 +1,182 @@
+'use strict';
+
+// ─── Shared validation regex (mirrors server.js constants) ───────────────────
+const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const LIQUIDITY_VALUE_REGEX = /^\d+(\.\d+)?\s*(SOL|USDC|USD)?$/i;
+const HTML_TAG_REGEX = /<[^>]*>/;
+
+/**
+ * Short-key to camelCase field name mapping used when parsing admin text input.
+ *
+ * ADD_LIQ → addLiquidityValue
+ * REM_LIQ → removeLiquidityValue
+ * FUNDING → walletFunding
+ * TOKENS  → tokensCreated
+ * NOTES   → forensicNotes
+ * LINKS   → crossProjectLinks
+ */
+const PREMIUM_INPUT_KEYS = {
+  ADD_LIQ: 'addLiquidityValue',
+  REM_LIQ: 'removeLiquidityValue',
+  FUNDING: 'walletFunding',
+  TOKENS:  'tokensCreated',
+  NOTES:   'forensicNotes',
+  LINKS:   'crossProjectLinks'
+};
+
+/**
+ * Parse structured premium text input into a plain data object.
+ *
+ * Lines must follow the format:  KEY: value
+ * TOKENS and LINKS values are split on commas to produce arrays.
+ * Unrecognised keys are silently ignored.
+ *
+ * @param {string} text
+ * @returns {{ addLiquidityValue?: string, removeLiquidityValue?: string,
+ *             walletFunding?: string, tokensCreated?: string[],
+ *             forensicNotes?: string, crossProjectLinks?: string[] }}
+ */
+function parsePremiumInput(text) {
+  if (typeof text !== 'string') return {};
+
+  const result = {};
+
+  for (const line of text.split('\n')) {
+    const colonIdx = line.indexOf(':');
+    if (colonIdx === -1) continue;
+
+    const rawKey    = line.substring(0, colonIdx).trim().toUpperCase();
+    const value     = line.substring(colonIdx + 1).trim();
+    const fieldName = PREMIUM_INPUT_KEYS[rawKey];
+
+    if (fieldName && value) result[fieldName] = value;
+  }
+
+  // Split comma-separated strings into arrays for array fields
+  if (typeof result.tokensCreated === 'string') {
+    result.tokensCreated = result.tokensCreated.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  if (typeof result.crossProjectLinks === 'string') {
+    result.crossProjectLinks = result.crossProjectLinks.split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  return result;
+}
+
+/**
+ * Validate parsed premium fields against the same rules enforced by
+ * PATCH /api/admin/wallets/:address/premium.
+ *
+ * @param {Object}   data  Output of parsePremiumInput()
+ * @returns {string[]}     Human-readable error messages (empty array = valid)
+ */
+function validatePremiumFields(data) {
+  const errors = [];
+
+  if (data.addLiquidityValue !== undefined) {
+    if (typeof data.addLiquidityValue !== 'string' || !LIQUIDITY_VALUE_REGEX.test(data.addLiquidityValue)) {
+      errors.push('ADD_LIQ must be a number optionally followed by SOL, USDC, or USD (e.g. 45.2 SOL)');
+    }
+  }
+
+  if (data.removeLiquidityValue !== undefined) {
+    if (typeof data.removeLiquidityValue !== 'string' || !LIQUIDITY_VALUE_REGEX.test(data.removeLiquidityValue)) {
+      errors.push('REM_LIQ must be a number optionally followed by SOL, USDC, or USD (e.g. 0.3 SOL)');
+    }
+  }
+
+  if (data.walletFunding !== undefined) {
+    if (
+      typeof data.walletFunding !== 'string' ||
+      data.walletFunding.length > 200 ||
+      HTML_TAG_REGEX.test(data.walletFunding)
+    ) {
+      errors.push('FUNDING must be a plain string, max 200 chars, with no HTML tags');
+    }
+  }
+
+  if (data.tokensCreated !== undefined) {
+    if (
+      !Array.isArray(data.tokensCreated) ||
+      !data.tokensCreated.every(addr => typeof addr === 'string' && WALLET_ADDRESS_REGEX.test(addr))
+    ) {
+      errors.push('TOKENS must be comma-separated valid Solana Base58 addresses (32–44 chars each)');
+    }
+  }
+
+  if (data.forensicNotes !== undefined) {
+    if (typeof data.forensicNotes !== 'string') {
+      errors.push('NOTES must be a string');
+    }
+  }
+
+  if (data.crossProjectLinks !== undefined) {
+    if (
+      !Array.isArray(data.crossProjectLinks) ||
+      !data.crossProjectLinks.every(addr => typeof addr === 'string' && WALLET_ADDRESS_REGEX.test(addr))
+    ) {
+      errors.push('LINKS must be comma-separated valid Solana Base58 addresses (32–44 chars each)');
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Build a human-readable confirmation preview message for the admin.
+ *
+ * @param {number|string} caseNumber
+ * @param {string}        walletAddress
+ * @param {Object}        parsed  Output of parsePremiumInput()
+ * @returns {string}
+ */
+function buildPremiumPreview(caseNumber, walletAddress, parsed) {
+  const fmt = (val) => {
+    if (val === undefined || val === null) return '(not set)';
+    return Array.isArray(val) ? val.join(', ') : String(val);
+  };
+
+  return [
+    `🔐 Premium Data Preview — Case #${caseNumber}`,
+    `Wallet: ${walletAddress}`,
+    '',
+    `ADD_LIQ:  ${fmt(parsed.addLiquidityValue)}`,
+    `REM_LIQ:  ${fmt(parsed.removeLiquidityValue)}`,
+    `FUNDING:  ${fmt(parsed.walletFunding)}`,
+    `TOKENS:   ${fmt(parsed.tokensCreated)}`,
+    `NOTES:    ${fmt(parsed.forensicNotes)}`,
+    `LINKS:    ${fmt(parsed.crossProjectLinks)}`,
+    '',
+    'Confirm to save this data?'
+  ].join('\n');
+}
+
+/** Help text shown by the /premium_help admin command. */
+const PREMIUM_HELP_TEXT = `📖 Premium Forensic Data Format
+
+Send a message in this exact format after clicking [📝 Add Premium Data] on a case:
+
+ADD_LIQ: 45.2 SOL
+REM_LIQ: 0.3 SOL
+FUNDING: CEX withdrawal (Binance)
+TOKENS: Token1Addr,Token2Addr
+NOTES: Repeated rugpull pattern across 3 projects
+LINKS: RelatedWallet1,RelatedWallet2
+
+Field rules:
+• ADD_LIQ / REM_LIQ — number followed by optional SOL, USDC, or USD (e.g. 45.2 SOL)
+• FUNDING — plain text, max 200 chars, no HTML tags
+• TOKENS — comma-separated Solana Base58 addresses (32–44 chars each)
+• NOTES — free-form text description of forensic findings
+• LINKS — comma-separated related wallet addresses (32–44 chars each)
+
+All fields are optional. Only provided fields will be updated.
+Use /premium_help at any time to see this format again.`;
+
+module.exports = {
+  parsePremiumInput,
+  validatePremiumFields,
+  buildPremiumPreview,
+  PREMIUM_HELP_TEXT,
+  PREMIUM_INPUT_KEYS
+};
