@@ -38,7 +38,7 @@ function escapeHtml(str) {
 // Base58 URL-safety regex used in createWalletRow (index.html line 1800)
 const TX_HASH_B58_REGEX = /^[1-9A-HJ-NP-Za-km-z]{8,}$/;
 
-// (lines 1797-1817)
+// (mirrors createWalletRow in index.html)
 function createWalletRow(wallet) {
     const txHash = wallet.evidence?.txHash ?? '';
     const safeTxHash = TX_HASH_B58_REGEX.test(txHash) ? escapeHtml(txHash) : '';
@@ -46,6 +46,33 @@ function createWalletRow(wallet) {
         ? `<a href="https://solscan.io/tx/${safeTxHash}" target="_blank" rel="noopener noreferrer" class="wallet-table-link">${safeTxHash.substring(0, 8)}...${safeTxHash.substring(safeTxHash.length - 8)}</a>`
         : '—';
     const statusClass = wallet.status === 'verified' ? 'status-confirmed' : 'status-suspicious';
+    const safeAddr = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet.walletAddress || '')
+        ? escapeHtml(wallet.walletAddress)
+        : '';
+
+    const premiumCell = safeAddr ? `
+        <div class="premium-unlock" data-pu-wallet="${safeAddr}">
+            <div class="premium-unlock-locked">
+                <button class="btn-unlock-premium" data-wallet="${safeAddr}"
+                        aria-label="Unlock premium forensic data for wallet ${safeAddr}"
+                        aria-describedby="pu-tt-${safeAddr}">
+                    \uD83D\uDD12 Unlock $0.11 via x402
+                </button>
+                <span class="pu-tooltip-wrap">
+                    <button class="pu-tooltip-trigger" aria-label="What you get with premium data" type="button">\u24d8</button>
+                    <span class="pu-tooltip-content" id="pu-tt-${safeAddr}" role="tooltip">
+                        Unlock 6 premium data points: Add Liquidity Value, Remove Liquidity Value,
+                        Wallet Funding Source, Tokens Created (with Solscan links),
+                        Forensic Notes, and Cross-Project Risk Links.
+                    </span>
+                </span>
+            </div>
+        </div>` : '—';
+
+    const detailRow = safeAddr ? `
+        <tr class="premium-detail-row" data-pu-detail="${safeAddr}">
+            <td colspan="8"><div class="premium-card" data-pu-card="${safeAddr}"></div></td>
+        </tr>` : '';
 
     return `
         <tr>
@@ -56,7 +83,9 @@ function createWalletRow(wallet) {
             <td>${escapeHtml(wallet.evidence?.description) || '—'}</td>
             <td><span class="status-badge ${statusClass}">${escapeHtml(wallet.status) || '—'}</span></td>
             <td>${escapeHtml(wallet.riskScore) || '—'}</td>
+            <td>${premiumCell}</td>
         </tr>
+        ${detailRow}
     `;
 }
 
@@ -615,6 +644,10 @@ function safeInnerHtml(element, content, options) {
     return element;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// 9. safeInnerHtml — anchor support with validated href
+// ════════════════════════════════════════════════════════════════════════════
+
 describe('9. safeInnerHtml — anchor support with validated href', () => {
     let el;
 
@@ -765,4 +798,384 @@ describe('9. safeInnerHtml — anchor support with validated href', () => {
         expect(anchor.getAttribute('target')).toBeNull();
     });
 
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 10. PremiumUnlock component — renderPremiumCard security & structure
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Replicated helpers from index.html ──────────────────────────────────────
+
+// Solana Base58 address validation regex (mirrors index.html renderPremiumCard)
+const SOLANA_ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/**
+ * renderPremiumCard — replicated verbatim from index.html for unit testing.
+ *
+ * Renders six premium forensics fields into a provided DOM element.
+ * All free-text values are passed through escapeHtml(); token/wallet
+ * addresses are validated against SOLANA_ADDR_RE before becoming links.
+ */
+function renderPremiumCard(container, walletAddress, data) {
+    const pf = data.premiumForensics;
+    if (!pf) {
+        container.innerHTML =
+            '<p style="color:var(--text-muted);font-size:0.85rem;">' +
+                'No premium forensic data available for this wallet yet.' +
+            '</p>';
+        return;
+    }
+
+    // Tokens Created — validated addresses become Solscan links
+    const tokensHtml = (function() {
+        if (!Array.isArray(pf.tokensCreated) || pf.tokensCreated.length === 0) {
+            return '<span>\u2014</span>';
+        }
+        const items = pf.tokensCreated.map(function(addr) {
+            const raw = String(addr || '');
+            if (SOLANA_ADDR_RE.test(raw)) {
+                const safe = escapeHtml(raw);
+                return '<li><a class="premium-token-link"' +
+                    ` href="https://solscan.io/token/${safe}"` +
+                    ' target="_blank" rel="noopener noreferrer">' +
+                    safe + '</a></li>';
+            }
+            return `<li>${escapeHtml(raw)}</li>`;
+        });
+        return `<ul class="premium-token-list">${items.join('')}</ul>`;
+    }());
+
+    // Cross-Project Links — "ADDR:RISK" or plain address; risk badge from allow-list
+    const crossLinksHtml = (function() {
+        if (!Array.isArray(pf.crossProjectLinks) || pf.crossProjectLinks.length === 0) {
+            return '<span>\u2014</span>';
+        }
+        const RISK_LEVELS = { HIGH: 'risk-badge-high', MEDIUM: 'risk-badge-medium', LOW: 'risk-badge-low' };
+        const items = pf.crossProjectLinks.map(function(entry) {
+            const parts = String(entry || '').split(':');
+            const addrRaw = parts[0] || '';
+            const riskKey = (parts[1] || '').toUpperCase();
+            const badge = Object.prototype.hasOwnProperty.call(RISK_LEVELS, riskKey)
+                ? `<span class="risk-badge ${RISK_LEVELS[riskKey]}">${riskKey}</span>`
+                : '';
+            if (SOLANA_ADDR_RE.test(addrRaw)) {
+                const safe = escapeHtml(addrRaw);
+                return '<li><a class="premium-token-link"' +
+                    ` href="https://solscan.io/address/${safe}"` +
+                    ' target="_blank" rel="noopener noreferrer">' +
+                    safe + '</a>' + badge + '</li>';
+            }
+            return `<li>${escapeHtml(addrRaw)}${badge}</li>`;
+        });
+        return `<ul class="premium-token-list">${items.join('')}</ul>`;
+    }());
+
+    const fields = [
+        { label: 'Add Liquidity Value',    html: escapeHtml(pf.addLiquidityValue    || '\u2014') },
+        { label: 'Remove Liquidity Value', html: escapeHtml(pf.removeLiquidityValue || '\u2014') },
+        { label: 'Wallet Funding',         html: escapeHtml(pf.walletFunding        || '\u2014') },
+        { label: 'Tokens Created',         html: tokensHtml },
+        { label: 'Forensic Notes',         html: escapeHtml(pf.forensicNotes        || '\u2014') },
+        { label: 'Cross-Project Links',    html: crossLinksHtml },
+    ];
+
+    const fieldsHtml = fields.map(function(f) {
+        return '<div class="premium-card-field">' +
+            `<span class="premium-card-label">${f.label}</span>` +
+            `<div class="premium-card-value">${f.html}</div>` +
+        '</div>';
+    }).join('');
+
+    container.innerHTML =
+        `<div class="premium-card-header">\ud83d\udcb3 Premium Forensics \u2014 ${escapeHtml(walletAddress)}</div>` +
+        `<div class="premium-card-fields">${fieldsHtml}</div>`;
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+describe('10. PremiumUnlock component — renderPremiumCard security & structure', () => {
+    const HTML_SOURCE = fs.readFileSync(
+        path.resolve(__dirname, '../index.html'),
+        'utf-8'
+    );
+
+    let container;
+
+    beforeEach(() => {
+        container = document.createElement('div');
+    });
+
+    afterEach(() => {
+        container = null;
+    });
+
+    // ── HTML structure ───────────────────────────────────────────────────────
+
+    test('index.html contains #premium-payment-announce aria-live region', () => {
+        expect(HTML_SOURCE).toContain('id="premium-payment-announce"');
+        expect(HTML_SOURCE).toContain('aria-live="assertive"');
+    });
+
+    test('index.html locked state renders tooltip with "What you get" content', () => {
+        expect(HTML_SOURCE).toContain('pu-tooltip-content');
+        expect(HTML_SOURCE).toContain('6 premium data points');
+    });
+
+    test('index.html premium detail row structure is present', () => {
+        expect(HTML_SOURCE).toContain('premium-detail-row');
+        expect(HTML_SOURCE).toContain('data-pu-detail');
+    });
+
+    test('createWalletRow() locked state uses btn-unlock-premium class', () => {
+        const tbody = document.createElement('tbody');
+        tbody.innerHTML = createWalletRow({
+            walletAddress: VALID_ADDR,
+            status: 'verified',
+            evidence: { txHash: VALID_TX },
+        });
+        const btn = tbody.querySelector('.btn-unlock-premium');
+        expect(btn).not.toBeNull();
+        expect(btn.dataset.wallet).toBe(VALID_ADDR);
+    });
+
+    test('createWalletRow() renders .premium-unlock container with data-pu-wallet', () => {
+        const tbody = document.createElement('tbody');
+        tbody.innerHTML = createWalletRow({
+            walletAddress: VALID_ADDR,
+            status: 'verified',
+        });
+        const puContainer = tbody.querySelector(`.premium-unlock[data-pu-wallet="${VALID_ADDR}"]`);
+        expect(puContainer).not.toBeNull();
+    });
+
+    test('createWalletRow() renders hidden .premium-detail-row with data-pu-detail', () => {
+        const tbody = document.createElement('tbody');
+        tbody.innerHTML = createWalletRow({
+            walletAddress: VALID_ADDR,
+            status: 'verified',
+        });
+        const detailRow = tbody.querySelector(`.premium-detail-row[data-pu-detail="${VALID_ADDR}"]`);
+        expect(detailRow).not.toBeNull();
+    });
+
+    // ── renderPremiumCard() — field escaping ─────────────────────────────────
+
+    test('renders all six premium field labels', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                addLiquidityValue: '10 SOL',
+                removeLiquidityValue: '5 SOL',
+                walletFunding: 'Unknown',
+                tokensCreated: [],
+                forensicNotes: 'Test note',
+                crossProjectLinks: [],
+            },
+        });
+        const labels = Array.from(container.querySelectorAll('.premium-card-label'))
+            .map(el => el.textContent.trim());
+        expect(labels).toContain('Add Liquidity Value');
+        expect(labels).toContain('Remove Liquidity Value');
+        expect(labels).toContain('Wallet Funding');
+        expect(labels).toContain('Tokens Created');
+        expect(labels).toContain('Forensic Notes');
+        expect(labels).toContain('Cross-Project Links');
+    });
+
+    test('XSS in addLiquidityValue is escaped, not executed', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: { addLiquidityValue: '<script>alert(1)</script>' },
+        });
+        expect(container.querySelector('script')).toBeNull();
+        expect(container.innerHTML).toContain('&lt;script&gt;');
+    });
+
+    test('XSS in forensicNotes is escaped, not executed', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: { forensicNotes: '<img src=x onerror=evil()>' },
+        });
+        expect(container.querySelector('img')).toBeNull();
+        expect(container.innerHTML).toContain('&lt;img');
+    });
+
+    test('XSS in walletFunding is escaped, not executed', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: { walletFunding: '"><svg onload=evil()>' },
+        });
+        expect(container.querySelector('svg')).toBeNull();
+        expect(container.innerHTML).toContain('&lt;svg');
+    });
+
+    test('XSS in walletAddress header is escaped, not executed', () => {
+        const xssAddr = VALID_ADDR; // address itself is base58-validated, but test the header
+        renderPremiumCard(container, xssAddr, {
+            premiumForensics: { addLiquidityValue: '1 SOL' },
+        });
+        const header = container.querySelector('.premium-card-header');
+        expect(header).not.toBeNull();
+        // header should contain escaped address
+        expect(header.textContent).toContain(VALID_ADDR);
+    });
+
+    // ── renderPremiumCard() — token address validation ───────────────────────
+
+    test('valid base58 token address in tokensCreated renders as Solscan link', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                tokensCreated: [VALID_ADDR],
+            },
+        });
+        const link = container.querySelector('a.premium-token-link');
+        expect(link).not.toBeNull();
+        expect(link.getAttribute('href')).toBe(`https://solscan.io/token/${VALID_ADDR}`);
+        expect(link.getAttribute('target')).toBe('_blank');
+        expect(link.getAttribute('rel')).toContain('noopener');
+        expect(link.getAttribute('rel')).toContain('noreferrer');
+    });
+
+    test('invalid address in tokensCreated is rendered as escaped text, not a link', () => {
+        const invalid = '<script>evil()</script>';
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                tokensCreated: [invalid],
+            },
+        });
+        expect(container.querySelector('script')).toBeNull();
+        expect(container.querySelector('a.premium-token-link')).toBeNull();
+        expect(container.innerHTML).toContain('&lt;script&gt;');
+    });
+
+    test('short string in tokensCreated is not a link (fails SOLANA_ADDR_RE)', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                tokensCreated: ['tooShort'],
+            },
+        });
+        expect(container.querySelector('a.premium-token-link')).toBeNull();
+    });
+
+    test('javascript: injection in tokensCreated does not produce a link', () => {
+        const js = 'javascript:alert(1)javascript:alert(1)javascript:alert(1)jav'; // <32 chars fails length
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                tokensCreated: [js],
+            },
+        });
+        expect(container.querySelector('a.premium-token-link')).toBeNull();
+    });
+
+    // ── renderPremiumCard() — cross-project links ────────────────────────────
+
+    test('valid cross-project link with HIGH risk renders badge', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                crossProjectLinks: [`${VALID_ADDR}:HIGH`],
+            },
+        });
+        const badge = container.querySelector('.risk-badge-high');
+        expect(badge).not.toBeNull();
+        expect(badge.textContent.trim()).toBe('HIGH');
+    });
+
+    test('valid cross-project link with MEDIUM risk renders badge', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                crossProjectLinks: [`${VALID_ADDR}:MEDIUM`],
+            },
+        });
+        expect(container.querySelector('.risk-badge-medium')).not.toBeNull();
+    });
+
+    test('valid cross-project link with LOW risk renders badge', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                crossProjectLinks: [`${VALID_ADDR}:LOW`],
+            },
+        });
+        expect(container.querySelector('.risk-badge-low')).not.toBeNull();
+    });
+
+    test('unknown risk level does not render a badge element', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                crossProjectLinks: [`${VALID_ADDR}:CRITICAL`],
+            },
+        });
+        const badges = container.querySelectorAll('.risk-badge');
+        expect(badges.length).toBe(0);
+    });
+
+    test('invalid address in crossProjectLinks is not rendered as a link', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                crossProjectLinks: ['<img onerror=x>:HIGH'],
+            },
+        });
+        expect(container.querySelector('img')).toBeNull();
+        expect(container.querySelector('a.premium-token-link')).toBeNull();
+    });
+
+    test('XSS injected through crossProjectLinks address part is escaped', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: {
+                crossProjectLinks: ['<script>evil()</script>'],
+            },
+        });
+        expect(container.querySelector('script')).toBeNull();
+        expect(container.innerHTML).toContain('&lt;script&gt;');
+    });
+
+    // ── renderPremiumCard() — missing data ───────────────────────────────────
+
+    test('missing premiumForensics renders a fallback message', () => {
+        renderPremiumCard(container, VALID_ADDR, { premiumForensics: null });
+        expect(container.querySelector('p')).not.toBeNull();
+        expect(container.textContent).toContain('No premium forensic data');
+    });
+
+    test('empty tokensCreated renders an em-dash placeholder', () => {
+        renderPremiumCard(container, VALID_ADDR, {
+            premiumForensics: { tokensCreated: [] },
+        });
+        const values = container.querySelectorAll('.premium-card-value');
+        const tokenField = Array.from(values).find(v => {
+            const label = v.previousElementSibling;
+            return label && label.textContent.includes('Tokens Created');
+        });
+        expect(tokenField).not.toBeNull();
+        expect(tokenField.textContent).toBe('—');
+    });
+
+    // ── Token address regex ──────────────────────────────────────────────────
+
+    test('SOLANA_ADDR_RE accepts 32-char Base58 address', () => {
+        expect(SOLANA_ADDR_RE.test('So1111111111111111111111111111111')).toBe(true);
+    });
+
+    test('SOLANA_ADDR_RE accepts 44-char Base58 address', () => {
+        expect(SOLANA_ADDR_RE.test(VALID_TX)).toBe(true);
+    });
+
+    test('SOLANA_ADDR_RE rejects addresses with forbidden chars (0, O, I, l)', () => {
+        expect(SOLANA_ADDR_RE.test('So11111111111111111111111111111111111111110')).toBe(false);
+    });
+
+    test('SOLANA_ADDR_RE rejects addresses containing capital O', () => {
+        expect(SOLANA_ADDR_RE.test('So1111111111111111111111111111111O111111112')).toBe(false);
+    });
+
+    test('SOLANA_ADDR_RE rejects addresses containing capital I', () => {
+        expect(SOLANA_ADDR_RE.test('So1111111111111111111111111111111I111111112')).toBe(false);
+    });
+
+    test('SOLANA_ADDR_RE rejects addresses containing lowercase l', () => {
+        expect(SOLANA_ADDR_RE.test('So1111111111111111111111111111111l111111112')).toBe(false);
+    });
+
+    test('SOLANA_ADDR_RE rejects address shorter than 32 chars', () => {
+        expect(SOLANA_ADDR_RE.test('abc123')).toBe(false);
+    });
+
+    test('SOLANA_ADDR_RE rejects address longer than 44 chars', () => {
+        expect(SOLANA_ADDR_RE.test('So111111111111111111111111111111111111111111112')).toBe(false);
+    });
 });

@@ -1108,6 +1108,158 @@
             opacity: 0.6;
             cursor: not-allowed;
         }
+
+        /* ==========================================
+           PREMIUM UNLOCK COMPONENT
+           ========================================== */
+
+        @keyframes pu-spin {
+            to { transform: rotate(360deg); }
+        }
+        .pu-spinner {
+            display: inline-block;
+            width: 13px;
+            height: 13px;
+            border: 2px solid var(--gray-444);
+            border-top-color: var(--hazard-orange);
+            border-radius: 50%;
+            animation: pu-spin 0.7s linear infinite;
+            vertical-align: middle;
+            flex-shrink: 0;
+        }
+        .premium-unlock { font-size: 0.78rem; }
+        .premium-unlock-locked { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+        .premium-unlock-loading { display: flex; align-items: center; gap: 6px; color: var(--text-muted); }
+        .premium-unlock-error { display: flex; flex-direction: column; gap: 4px; }
+        .premium-unlock-error-msg { color: var(--alert-red); }
+        .btn-premium-retry {
+            background: transparent;
+            border: 1px solid var(--alert-red);
+            color: var(--alert-red);
+            border-radius: 4px;
+            padding: 2px 7px;
+            font-size: 0.74rem;
+            cursor: pointer;
+            align-self: flex-start;
+            transition: background 0.15s, color 0.15s;
+        }
+        .btn-premium-retry:hover { background: var(--alert-red); color: #fff; }
+        .premium-unlock-success { color: var(--cctv-green); font-size: 0.78rem; }
+
+        /* "What you get" tooltip */
+        .pu-tooltip-wrap { position: relative; display: inline-flex; }
+        .pu-tooltip-trigger {
+            background: none;
+            border: 1px solid var(--gray-555);
+            border-radius: 50%;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.68rem;
+            width: 16px;
+            height: 16px;
+            line-height: 14px;
+            text-align: center;
+            padding: 0;
+            flex-shrink: 0;
+        }
+        .pu-tooltip-trigger:focus + .pu-tooltip-content,
+        .pu-tooltip-trigger:hover + .pu-tooltip-content { display: block; }
+        .pu-tooltip-content {
+            display: none;
+            position: absolute;
+            bottom: calc(100% + 6px);
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--gray-222);
+            border: 1px solid var(--gray-444);
+            border-radius: 4px;
+            padding: 8px 10px;
+            width: 215px;
+            font-size: 0.75rem;
+            color: var(--text-main);
+            z-index: 200;
+            pointer-events: none;
+            line-height: 1.5;
+            white-space: normal;
+        }
+        .pu-tooltip-content::after {
+            content: '';
+            position: absolute;
+            top: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            border: 5px solid transparent;
+            border-top-color: var(--gray-444);
+        }
+
+        /* Premium detail (expanded) row */
+        .premium-detail-row { display: none; }
+        .premium-detail-row.visible { display: table-row; }
+        .premium-detail-row > td {
+            padding: 0 !important;
+            background: var(--bg-secondary);
+        }
+        .premium-card {
+            border-left: 3px solid var(--hazard-orange);
+            padding: 14px 18px;
+        }
+        .premium-card-header {
+            font-weight: 700;
+            color: var(--hazard-orange);
+            font-size: 0.85rem;
+            margin-bottom: 10px;
+        }
+        .premium-card-fields {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 10px 18px;
+        }
+        .premium-card-field { display: flex; flex-direction: column; gap: 2px; }
+        .premium-card-label {
+            font-size: 0.7rem;
+            font-weight: 700;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .premium-card-value { font-size: 0.82rem; color: var(--text-main); word-break: break-all; }
+        .premium-token-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 2px; }
+        .premium-token-link {
+            color: var(--hazard-orange);
+            text-decoration: none;
+            font-family: var(--font-mono);
+            font-size: 0.76rem;
+        }
+        .premium-token-link:hover { text-decoration: underline; }
+        .risk-badge {
+            display: inline-block;
+            border-radius: 3px;
+            padding: 1px 5px;
+            font-size: 0.66rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            margin-left: 4px;
+            vertical-align: middle;
+        }
+        .risk-badge-high { background: var(--alert-red); color: #fff; }
+        .risk-badge-medium { background: var(--warning-orange); color: #fff; }
+        .risk-badge-low { background: var(--gray-555); color: #fff; }
+
+        @media (max-width: 640px) {
+            .premium-card-fields { grid-template-columns: 1fr; }
+            .premium-card { padding: 10px 12px; }
+            .pu-tooltip-content {
+                left: auto;
+                right: 0;
+                transform: none;
+            }
+            .pu-tooltip-content::after {
+                left: auto;
+                right: 10px;
+                transform: none;
+            }
+        }
     </style>
     <!-- x402gateway.io SDK: enables x402 micropayment flow for premium forensic data unlock.
          SECURITY NOTE: Add an integrity="sha384-..." SRI hash attribute once the SDK URL is
@@ -1251,6 +1403,8 @@
 
             <!-- Visually hidden live region for wallet loading status (WCAG 4.1.3) -->
             <div id="wallet-status-announce" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+            <!-- Visually hidden live region for premium payment flow status (WCAG 4.1.3) -->
+            <div id="premium-payment-announce" class="sr-only" aria-live="assertive" aria-atomic="true"></div>
 
             <!-- Container for API data -->
             <div class="max-w-5xl mt-12" id="wallet-list-container" role="region" aria-label="Verified scammer wallet database">
@@ -1850,6 +2004,30 @@
                 ? escapeHtml(wallet.walletAddress)
                 : '';
 
+            const premiumCell = safeAddr ? `
+                <div class="premium-unlock" data-pu-wallet="${safeAddr}">
+                    <div class="premium-unlock-locked">
+                        <button class="btn-unlock-premium" data-wallet="${safeAddr}"
+                                aria-label="Unlock premium forensic data for wallet ${safeAddr}"
+                                aria-describedby="pu-tt-${safeAddr}">
+                            🔒 Unlock $0.11 via x402
+                        </button>
+                        <span class="pu-tooltip-wrap">
+                            <button class="pu-tooltip-trigger" aria-label="What you get with premium data" type="button">ⓘ</button>
+                            <span class="pu-tooltip-content" id="pu-tt-${safeAddr}" role="tooltip">
+                                Unlock 6 premium data points: Add Liquidity Value, Remove Liquidity Value,
+                                Wallet Funding Source, Tokens Created (with Solscan links),
+                                Forensic Notes, and Cross-Project Risk Links.
+                            </span>
+                        </span>
+                    </div>
+                </div>` : '—';
+
+            const detailRow = safeAddr ? `
+                <tr class="premium-detail-row" data-pu-detail="${safeAddr}">
+                    <td colspan="8"><div class="premium-card" data-pu-card="${safeAddr}"></div></td>
+                </tr>` : '';
+
             return `
                 <tr>
                     <td>${escapeHtml(wallet.caseNumber) || '—'}</td>
@@ -1859,10 +2037,9 @@
                     <td>${escapeHtml(wallet.evidence?.description) || '—'}</td>
                     <td><span class="status-badge ${statusClass}">${escapeHtml(wallet.status) || '—'}</span></td>
                     <td>${escapeHtml(wallet.riskScore) || '—'}</td>
-                    <td>${safeAddr
-                        ? `<button class="btn-unlock-premium" data-wallet="${safeAddr}" aria-label="Unlock premium forensic data for wallet ${safeAddr}">🔓 Unlock ($0.11)</button>`
-                        : '—'}</td>
+                    <td>${premiumCell}</td>
                 </tr>
+                ${detailRow}
             `;
         }
 
@@ -1871,25 +2048,88 @@
         // ==========================================
 
         /**
+         * loadX402Sdk()
+         *
+         * Ensures the x402gateway.io SDK is available.
+         * If the SDK is already functional, resolves immediately.
+         * Otherwise injects a fresh <script> tag (the static tag in <head> may have already
+         * fired its load/error event before this function runs, so attaching listeners to it
+         * would never resolve; injecting a new element guarantees the events fire correctly).
+         */
+        function loadX402Sdk() {
+            return new Promise(function(resolve, reject) {
+                // Fast path: SDK already available
+                if (typeof window.x402 !== 'undefined' && typeof window.x402.requestPayment === 'function') {
+                    resolve();
+                    return;
+                }
+                // The static <script> in <head> is synchronous; by the time the user clicks,
+                // its load/error event has already fired and re-attaching listeners would hang.
+                // Inject a fresh element so the events are guaranteed to trigger.
+                const script = document.createElement('script');
+                script.src = 'https://cdn.x402gateway.io/sdk/v1/x402.min.js';
+                script.crossOrigin = 'anonymous';
+                script.referrerPolicy = 'no-referrer';
+                script.addEventListener('load', resolve);
+                script.addEventListener('error', function() {
+                    reject(new Error('x402 SDK failed to load'));
+                });
+                document.head.appendChild(script);
+            });
+        }
+
+        /**
          * unlockPremiumData(walletAddress)
          *
          * Initiates an x402 micropayment flow for the given wallet address:
-         *   1. Calls POST /api/wallets/:address/premium/access (expects 402 on first attempt).
-         *   2. Uses the x402gateway.io SDK to fulfill the payment requirement.
-         *   3. Retries the request with the payment token in the x402-payment header.
-         *   4. Displays the returned premiumForensics data in a notification.
+         *   1. Ensures the x402gateway.io SDK is available (loads it dynamically if absent).
+         *   2. Calls POST /api/wallets/:address/premium/access (expects 402 on first attempt).
+         *   3. Uses the x402gateway.io SDK to fulfill the payment requirement.
+         *   4. Retries the request with the payment token in the x402-payment header.
+         *   5. Renders the returned premiumForensics data in an inline premium card.
          *
-         * Frontend integration note: requires the x402gateway.io SDK to be loaded
-         * (see <script src="https://cdn.x402gateway.io/sdk/v1/x402.min.js"> in <head>).
+         * Component state is managed via the .premium-unlock[data-pu-wallet] container so
+         * that each row independently tracks locked / loading / error / success.
          */
         async function unlockPremiumData(walletAddress) {
-            const btn = document.querySelector(`.btn-unlock-premium[data-wallet="${CSS.escape(walletAddress)}"]`);
-            if (btn) {
-                btn.disabled = true;
-                btn.textContent = '⏳ Processing…';
+            const puContainer = document.querySelector(
+                `.premium-unlock[data-pu-wallet="${CSS.escape(walletAddress)}"]`
+            );
+            const announcer = document.getElementById('premium-payment-announce');
+
+            function setPuState(html) {
+                if (puContainer) puContainer.innerHTML = html;
             }
 
+            function announce(msg) {
+                if (!announcer) return;
+                announcer.textContent = msg;
+                setTimeout(function() { announcer.textContent = ''; }, 4000);
+            }
+
+            // Transition to loading state
+            setPuState(
+                '<div class="premium-unlock-loading">' +
+                    '<span class="pu-spinner" aria-hidden="true"></span>' +
+                    ' Processing payment\u2026' +
+                '</div>'
+            );
+            announce('Initiating x402 payment for premium forensic data.');
+
             try {
+                // Step 0: ensure SDK is available (dynamic loading fallback)
+                await loadX402Sdk();
+
+                if (typeof window.x402 === 'undefined' || typeof window.x402.requestPayment !== 'function') {
+                    setPuState(
+                        '<div class="premium-unlock-error">' +
+                            '<span class="premium-unlock-error-msg">\u26a0 x402 SDK unavailable. Please refresh.</span>' +
+                        '</div>'
+                    );
+                    announce('Payment SDK could not be loaded. Please refresh the page.');
+                    return;
+                }
+
                 const endpoint = `${API_BASE_URL}/wallets/${encodeURIComponent(walletAddress)}/premium/access`;
 
                 // Step 1: probe the endpoint — expect a 402 with payment details
@@ -1899,85 +2139,199 @@
 
                 if (probeRes.status === 402) {
                     // Step 2: read required amount from 402 response (avoids frontend/backend drift)
-                    const payReq = await probeRes.json().catch(() => ({}));
+                    const payReq = await probeRes.json().catch(function() { return {}; });
                     const requiredAmount = typeof payReq.requiredAmountUSD === 'number'
                         ? payReq.requiredAmountUSD
                         : 0.11;
 
-                    // Request payment via x402gateway.io SDK
-                    if (typeof window.x402 !== 'undefined' && typeof window.x402.requestPayment === 'function') {
-                        paymentToken = await window.x402.requestPayment({
-                            amount:    requiredAmount,
-                            currency:  'USD',
-                            recipient: 'suspected.dev',
-                            memo:      `Premium forensic data: ${walletAddress}`
-                        });
-                    } else {
-                        showNotification('x402 payment SDK not loaded. Please refresh and try again.', 'error');
-                        return;
-                    }
+                    announce('Payment required. Opening x402 payment dialog.');
+                    paymentToken = await window.x402.requestPayment({
+                        amount:    requiredAmount,
+                        currency:  'USD',
+                        recipient: 'suspected.dev',
+                        memo:      `Premium forensic data: ${walletAddress}`
+                    });
+
                 } else if (probeRes.ok) {
                     // Payment not required (e.g. already authorized) — use the direct response
                     const data = await probeRes.json();
-                    displayPremiumData(walletAddress, data);
+                    renderPremiumCard(walletAddress, data);
+                    setPuState('<div class="premium-unlock-success">\u2713 Unlocked \u2014 see below</div>');
+                    announce('Premium forensic data unlocked successfully.');
                     return;
+
                 } else {
-                    const err = await probeRes.json().catch(() => ({}));
-                    showNotification(`Error: ${escapeHtml(err.message || 'Unexpected error')}`, 'error');
+                    const err = await probeRes.json().catch(function() { return {}; });
+                    const safeMsg = escapeHtml(err.message || 'Unexpected error');
+                    setPuState(
+                        '<div class="premium-unlock-error">' +
+                            `<span class="premium-unlock-error-msg">\u26a0 ${safeMsg}</span>` +
+                            `<button class="btn-premium-retry" data-wallet="${escapeHtml(walletAddress)}">\u21a9 Retry</button>` +
+                        '</div>'
+                    );
+                    announce(`Payment error: ${err.message || 'Unexpected error'}`);
                     return;
                 }
 
                 // Step 3: retry with the payment token
+                announce('Payment confirmed. Fetching premium data\u2026');
                 const paidRes = await fetch(endpoint, {
                     method:  'POST',
                     headers: { 'x402-payment': paymentToken }
                 });
 
                 if (!paidRes.ok) {
-                    const err = await paidRes.json().catch(() => ({}));
-                    showNotification(`Payment failed: ${escapeHtml(err.message || 'Verification error')}`, 'error');
+                    const err = await paidRes.json().catch(function() { return {}; });
+                    const safeMsg = escapeHtml(err.message || 'Verification error');
+                    setPuState(
+                        '<div class="premium-unlock-error">' +
+                            `<span class="premium-unlock-error-msg">\u26a0 Payment failed: ${safeMsg}</span>` +
+                            `<button class="btn-premium-retry" data-wallet="${escapeHtml(walletAddress)}">\u21a9 Retry</button>` +
+                        '</div>'
+                    );
+                    announce(`Payment verification failed: ${err.message || 'Verification error'}`);
                     return;
                 }
 
                 const data = await paidRes.json();
-                displayPremiumData(walletAddress, data);
+                renderPremiumCard(walletAddress, data);
+                setPuState('<div class="premium-unlock-success">\u2713 Unlocked \u2014 see below</div>');
+                announce('Premium forensic data unlocked successfully.');
 
             } catch (error) {
-                showNotification(`Unlock failed: ${escapeHtml(error.message)}`, 'error');
-            } finally {
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = '🔓 Unlock ($0.11)';
-                }
+                const safeMsg = escapeHtml(error.message || 'Unknown error');
+                setPuState(
+                    '<div class="premium-unlock-error">' +
+                        `<span class="premium-unlock-error-msg">\u26a0 ${safeMsg}</span>` +
+                        `<button class="btn-premium-retry" data-wallet="${escapeHtml(walletAddress)}">\u21a9 Retry</button>` +
+                    '</div>'
+                );
+                announce(`Unlock failed: ${error.message || 'Unknown error'}`);
             }
         }
 
         /**
-         * Renders a premium forensics payload in a browser notification.
+         * renderPremiumCard(walletAddress, data)
+         *
+         * Renders all six premium forensics fields into the wallet's detail row.
+         *
+         * Security:
+         *   - Every free-text field is passed through escapeHtml() before insertion.
+         *   - Token addresses in tokensCreated are validated against the Solana Base58
+         *     address regex before being rendered as <a> links; invalid values are
+         *     rendered as escaped plain text instead.
+         *   - Cross-project link entries may carry a "ADDR:RISK" format; the address
+         *     portion is independently validated and the risk badge is from a hard-coded
+         *     allow-list, so no user-supplied value reaches the DOM unescaped.
          */
-        function displayPremiumData(walletAddress, data) {
+        function renderPremiumCard(walletAddress, data) {
+            const detailRow = document.querySelector(
+                `.premium-detail-row[data-pu-detail="${CSS.escape(walletAddress)}"]`
+            );
+            const card = document.querySelector(
+                `.premium-card[data-pu-card="${CSS.escape(walletAddress)}"]`
+            );
+            if (!detailRow || !card) return;
+
             const pf = data.premiumForensics;
             if (!pf) {
-                showNotification('No premium forensic data available for this wallet yet.', 'info');
+                card.innerHTML =
+                    '<p style="color:var(--text-muted);font-size:0.85rem;">' +
+                        'No premium forensic data available for this wallet yet.' +
+                    '</p>';
+                detailRow.classList.add('visible');
                 return;
             }
-            const lines = [
-                `💎 Premium Forensics — ${escapeHtml(walletAddress)}`,
-                pf.addLiquidityValue    ? `Add Liq: ${escapeHtml(pf.addLiquidityValue)}`       : null,
-                pf.removeLiquidityValue ? `Remove Liq: ${escapeHtml(pf.removeLiquidityValue)}` : null,
-                pf.walletFunding        ? `Funding: ${escapeHtml(pf.walletFunding)}`            : null,
-                pf.forensicNotes        ? `Notes: ${escapeHtml(pf.forensicNotes)}`              : null
-            ].filter(Boolean).join('\n');
-            showNotification(lines, 'success');
+
+            // Solana Base58 address format (32–44 chars, no 0/O/I/l)
+            const SOLANA_ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+            // Tokens Created — validated addresses become Solscan links
+            const tokensHtml = (function() {
+                if (!Array.isArray(pf.tokensCreated) || pf.tokensCreated.length === 0) {
+                    return '<span>\u2014</span>';
+                }
+                const items = pf.tokensCreated.map(function(addr) {
+                    const raw = String(addr || '');
+                    if (SOLANA_ADDR_RE.test(raw)) {
+                        const safe = escapeHtml(raw);
+                        return '<li><a class="premium-token-link"' +
+                            ` href="https://solscan.io/token/${safe}"` +
+                            ' target="_blank" rel="noopener noreferrer">' +
+                            safe + '</a></li>';
+                    }
+                    return `<li>${escapeHtml(raw)}</li>`;
+                });
+                return `<ul class="premium-token-list">${items.join('')}</ul>`;
+            }());
+
+            // Cross-Project Links — "ADDR:RISK" or plain address; risk badge from allow-list
+            const crossLinksHtml = (function() {
+                if (!Array.isArray(pf.crossProjectLinks) || pf.crossProjectLinks.length === 0) {
+                    return '<span>\u2014</span>';
+                }
+                const RISK_LEVELS = { HIGH: 'risk-badge-high', MEDIUM: 'risk-badge-medium', LOW: 'risk-badge-low' };
+                const items = pf.crossProjectLinks.map(function(entry) {
+                    const parts = String(entry || '').split(':');
+                    const addrRaw = parts[0] || '';
+                    const riskKey = (parts[1] || '').toUpperCase();
+                    const badge = Object.prototype.hasOwnProperty.call(RISK_LEVELS, riskKey)
+                        ? `<span class="risk-badge ${RISK_LEVELS[riskKey]}">${riskKey}</span>`
+                        : '';
+                    if (SOLANA_ADDR_RE.test(addrRaw)) {
+                        const safe = escapeHtml(addrRaw);
+                        return '<li><a class="premium-token-link"' +
+                            ` href="https://solscan.io/address/${safe}"` +
+                            ' target="_blank" rel="noopener noreferrer">' +
+                            safe + '</a>' + badge + '</li>';
+                    }
+                    return `<li>${escapeHtml(addrRaw)}${badge}</li>`;
+                });
+                return `<ul class="premium-token-list">${items.join('')}</ul>`;
+            }());
+
+            // Build the card HTML — all free-text values go through escapeHtml()
+            const fields = [
+                { label: 'Add Liquidity Value',    html: escapeHtml(pf.addLiquidityValue    || '\u2014') },
+                { label: 'Remove Liquidity Value', html: escapeHtml(pf.removeLiquidityValue || '\u2014') },
+                { label: 'Wallet Funding',         html: escapeHtml(pf.walletFunding        || '\u2014') },
+                { label: 'Tokens Created',         html: tokensHtml },
+                { label: 'Forensic Notes',         html: escapeHtml(pf.forensicNotes        || '\u2014') },
+                { label: 'Cross-Project Links',    html: crossLinksHtml },
+            ];
+
+            const fieldsHtml = fields.map(function(f) {
+                return '<div class="premium-card-field">' +
+                    `<span class="premium-card-label">${f.label}</span>` +
+                    `<div class="premium-card-value">${f.html}</div>` +
+                '</div>';
+            }).join('');
+
+            card.innerHTML =
+                `<div class="premium-card-header">\ud83d\udcb3 Premium Forensics \u2014 ${escapeHtml(walletAddress)}</div>` +
+                `<div class="premium-card-fields">${fieldsHtml}</div>`;
+
+            detailRow.classList.add('visible');
         }
 
-        // Delegate unlock button clicks — avoids per-row event listener churn
+        // Delegate premium button clicks — avoids per-row event listener churn
         document.addEventListener('click', function(e) {
-            const btn = e.target.closest('.btn-unlock-premium');
-            if (!btn) return;
-            const addr = btn.dataset.wallet || '';
-            if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) {
-                unlockPremiumData(addr);
+            // Unlock button
+            const unlockBtn = e.target.closest('.btn-unlock-premium');
+            if (unlockBtn) {
+                const addr = unlockBtn.dataset.wallet || '';
+                if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) {
+                    unlockPremiumData(addr);
+                }
+                return;
+            }
+            // Retry button (shown on payment/network error)
+            const retryBtn = e.target.closest('.btn-premium-retry');
+            if (retryBtn) {
+                const addr = retryBtn.dataset.wallet || '';
+                if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) {
+                    unlockPremiumData(addr);
+                }
             }
         });
 
