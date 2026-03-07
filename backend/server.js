@@ -11,6 +11,7 @@ const rateLimit = require('express-rate-limit');
 const TelegramBot = require('node-telegram-bot-api');
 
 const Wallet = require('./models/wallet');
+const { verifyX402Payment } = require('./middleware/verifyX402Payment');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -245,18 +246,54 @@ app.get('/api/wallets', async (req, res) => {
 });
 
 // PUBLIC DETAIL
-app.get('/api/wallets/:address', async (req, res) => {
+// Accepts optional ?include=premium query param.
+// When ?include=premium is present, verifyX402Payment is applied and
+// the response includes forensic + premiumForensics fields.
+function premiumQueryGate(req, res, next) {
+  if (req.query.include === 'premium') {
+    return verifyX402Payment(0.11)(req, res, next);
+  }
+  next();
+}
+
+app.get('/api/wallets/:address', premiumQueryGate, async (req, res) => {
   try {
+    const includePremium = req.query.include === 'premium' && req.x402?.valid;
+    const selectFields   = includePremium ? '-__v' : '-forensic -premiumForensics -__v';
+
     const wallet = await Wallet.findOne({
       walletAddress: req.params.address,
       status: 'verified'
-    }).select('-forensic -premiumForensics -__v');
+    }).select(selectFields);
 
     if (!wallet) return res.status(404).json({ message: 'Not found' });
 
     res.json(wallet);
   } catch (err) {
     console.error('GET /api/wallets/:address error:', err.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// EXPLICIT PREMIUM UNLOCK ENDPOINT (x402 payment required)
+// POST /api/wallets/:address/premium/access
+// Returns forensic + premiumForensics for verified wallets after payment.
+app.post('/api/wallets/:address/premium/access', verifyX402Payment(0.11), async (req, res) => {
+  try {
+    const wallet = await Wallet.findOne({
+      walletAddress: req.params.address,
+      status: 'verified'
+    });
+
+    if (!wallet) return res.status(404).json({ message: 'Not found' });
+
+    res.json({
+      payerAddress:    req.x402.payerAddress,
+      forensic:        wallet.forensic        || null,
+      premiumForensics: wallet.premiumForensics || null
+    });
+  } catch (err) {
+    console.error('POST /api/wallets/:address/premium/access error:', err.message);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
