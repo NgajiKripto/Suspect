@@ -1,17 +1,29 @@
 'use strict';
 
 /**
- * verifyX402Payment — x402 payment middleware for suspected.dev
+ * verifyX402Payment — unified x402 payment middleware for suspected.dev
  *
- * Validates the `x402-payment` JWT header by:
- *   1. Decoding the JWT and locating the signing key via x402gateway.io JWKS
- *   2. Verifying the JWT signature with the fetched public key
- *   3. Converting the payment amount to USD (SOL/USD oracle, 5-min cached TTL)
- *   4. Checking amount >= expectedAmountUSD
- *   5. Extracting the payer address from JWT claims
+ * Factory that returns an Express middleware validating the `x402-payment`
+ * header. Supports two modes via an `options` parameter:
  *
- * On success: attaches req.x402 = { valid: true, payerAddress: string }
- * On failure: responds 402 Payment Required
+ *   mode: 'basic'   (timingSafeEqual secret comparison)
+ *     1. Checks header presence
+ *     2. Compares header value against process.env.X402_PAYMENT_SECRET using
+ *        crypto.timingSafeEqual to prevent timing attacks
+ *     On success: req.x402 = { valid: true, payerAddress: null, amountUSD: null }
+ *
+ *   mode: 'premium'  (JWT + JWKS + oracle — default)
+ *     1. Decodes the JWT and locates the signing key via x402gateway.io JWKS
+ *     2. Verifies the JWT signature with the fetched public key
+ *     3. Converts the payment amount to USD (SOL/USD oracle, 5-min cached TTL)
+ *     4. Checks amount >= expectedAmountUSD
+ *     5. Extracts the payer address from JWT claims
+ *     On success: req.x402 = { valid: true, payerAddress: string, amountUSD: number }
+ *
+ * Backward compatibility: passing a plain number is equivalent to
+ *   { mode: 'premium', expectedAmountUSD: number }.
+ *
+ * On failure: responds 402 Payment Required.
  *
  * All payment attempts (success and failure) are logged to stderr as
  * newline-delimited JSON. Sensitive values (the raw JWT) are never logged.
@@ -112,35 +124,78 @@ function jwkToPublicKey(jwk) {
 
 // ── Middleware factory ─────────────────────────────────────────────────────────
 /**
- * verifyX402Payment(expectedAmountUSD = 0.11)
+ * verifyX402Payment(options)
  *
- * Returns an Express middleware function. On success it attaches:
- *   req.x402 = { valid: true, payerAddress: string }
+ * Returns an Express middleware function. On success it attaches req.x402 and
+ * calls next(). On failure it sends 402 Payment Required.
  *
- * and calls next(). On failure it sends 402 Payment Required.
+ * @param {number|object} options
+ *   Passing a plain number is backward-compatible shorthand for
+ *   { mode: 'premium', expectedAmountUSD: <number> }.
  *
- * @param {number} expectedAmountUSD  Minimum USD payment required (default: 0.11)
+ *   Object shape:
+ *     mode              'basic' | 'premium'  (default: 'premium')
+ *     expectedAmountUSD  number               (default: 0.11, premium mode only)
+ *
+ * req.x402 on success:
+ *   { valid: true, payerAddress: string|null, amountUSD: number|null }
+ *   - basic mode:   payerAddress and amountUSD are null (no JWT to inspect)
+ *   - premium mode: payerAddress is the JWT payer claim; amountUSD is in USD
  */
-function verifyX402Payment(expectedAmountUSD = 0.11) {
+function verifyX402Payment(options = {}) {
+  // ── Normalise options (backward-compat: plain number → premium mode) ────────
+  let mode, expectedAmountUSD;
+  if (typeof options === 'number') {
+    mode = 'premium';
+    expectedAmountUSD = options;
+  } else {
+    mode = options.mode || 'premium';
+    // expectedAmountUSD is only relevant in 'premium' mode; ignored in 'basic' mode
+    expectedAmountUSD = options.expectedAmountUSD !== undefined ? options.expectedAmountUSD : 0.11;
+  }
+
   return async function x402PaymentMiddleware(req, res, next) {
     const paymentHeader = req.headers['x402-payment'];
     const logBase = {
       timestamp:        new Date().toISOString(),
       ip:               req.ip,
       path:             req.originalUrl,
+      mode,
       hasPaymentHeader: Boolean(paymentHeader)
     };
 
-    // ── 1. Header presence check ─────────────────────────────────────────────
+    // ── 1. Header presence check (both modes) ──────────────────────────────
     if (!paymentHeader) {
       logPaymentAttempt({ ...logBase, result: 'missing_header' });
-      return res.status(402).json({
-        error:              'Payment Required',
-        message:            'x402-payment header is required',
-        requiredAmountUSD:  expectedAmountUSD
-      });
+      const body = { error: 'Payment Required', message: 'x402-payment header is required' };
+      if (mode === 'premium') body.requiredAmountUSD = expectedAmountUSD;
+      return res.status(402).json(body);
     }
 
+    // ── Basic mode: timingSafeEqual comparison ────────────────────────────────
+    if (mode === 'basic') {
+      const validToken = process.env.X402_PAYMENT_SECRET;
+      if (!validToken) {
+        logPaymentAttempt({ ...logBase, result: 'no_secret_configured' });
+        return res.status(402).json({ error: 'Payment Required', message: 'Payment required via x402' });
+      }
+      try {
+        const paidBuf  = Buffer.from(paymentHeader);
+        const validBuf = Buffer.from(validToken);
+        if (paidBuf.length !== validBuf.length || !crypto.timingSafeEqual(paidBuf, validBuf)) {
+          logPaymentAttempt({ ...logBase, result: 'invalid_secret' });
+          return res.status(402).json({ error: 'Payment Required', message: 'Payment required via x402' });
+        }
+      } catch {
+        logPaymentAttempt({ ...logBase, result: 'comparison_error' });
+        return res.status(402).json({ error: 'Payment Required', message: 'Payment required via x402' });
+      }
+      logPaymentAttempt({ ...logBase, result: 'success' });
+      req.x402 = { valid: true, payerAddress: null, amountUSD: null };
+      return next();
+    }
+
+    // ── Premium mode: JWT + JWKS + oracle ────────────────────────────────────
     try {
       // ── 2. Decode JWT (no verification) to read the kid claim ──────────────
       const decoded = jwt.decode(paymentHeader, { complete: true });
@@ -206,7 +261,7 @@ function verifyX402Payment(expectedAmountUSD = 0.11) {
       }
 
       logPaymentAttempt({ ...logBase, result: 'success', payerAddress, amountUSD });
-      req.x402 = { valid: true, payerAddress };
+      req.x402 = { valid: true, payerAddress, amountUSD };
       next();
 
     } catch (err) {

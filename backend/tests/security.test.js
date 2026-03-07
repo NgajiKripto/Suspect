@@ -2032,3 +2032,119 @@ describe('28. auditLog utility — hashIp and writeAuditLog', () => {
     expect(() => writeAuditLog({})).not.toThrow();
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// 29. verifyX402Payment({ mode: 'basic' }) — timingSafeEqual backward-compat
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('29. verifyX402Payment({ mode: \'basic\' }) — backward-compat tests', () => {
+  const BASIC_SECRET = 'test-basic-secret-x402-bc';
+
+  // High-limit rate limiter for test apps (avoids CodeQL missing-rate-limiting alert)
+  const BASIC_TEST_RATE_LIMIT = rateLimit({
+    windowMs: 60 * 60 * 1000, max: 10000,
+    standardHeaders: false, legacyHeaders: false
+  });
+
+  function buildBasicModeApp() {
+    const app = express();
+    app.use(express.json());
+    app.get('/test/basic',
+      BASIC_TEST_RATE_LIMIT,
+      verifyX402Payment({ mode: 'basic' }),
+      (req, res) => res.json({
+        valid:        req.x402.valid,
+        payerAddress: req.x402.payerAddress,
+        amountUSD:    req.x402.amountUSD
+      })
+    );
+    return app;
+  }
+
+  beforeEach(() => { process.env.X402_PAYMENT_SECRET = BASIC_SECRET; });
+  afterEach(() => { delete process.env.X402_PAYMENT_SECRET; });
+
+  test('returns 402 when x402-payment header is absent', async () => {
+    const res = await request(buildBasicModeApp()).get('/test/basic');
+    expect(res.status).toBe(402);
+    expect(res.body).toHaveProperty('error', 'Payment Required');
+    expect(res.body).toHaveProperty('message');
+    expect(res.body).not.toHaveProperty('premiumForensics');
+  });
+
+  test('returns 402 when x402-payment does not match X402_PAYMENT_SECRET', async () => {
+    const res = await request(buildBasicModeApp())
+      .get('/test/basic')
+      .set('x402-payment', 'wrong-secret');
+    expect(res.status).toBe(402);
+  });
+
+  test('returns 200 and sets req.x402 when x402-payment matches X402_PAYMENT_SECRET', async () => {
+    const res = await request(buildBasicModeApp())
+      .get('/test/basic')
+      .set('x402-payment', BASIC_SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body.valid).toBe(true);
+    expect(res.body.payerAddress).toBeNull();
+    expect(res.body.amountUSD).toBeNull();
+  });
+
+  test('returns 402 when X402_PAYMENT_SECRET env var is not set', async () => {
+    delete process.env.X402_PAYMENT_SECRET;
+    const res = await request(buildBasicModeApp())
+      .get('/test/basic')
+      .set('x402-payment', 'any-value');
+    expect(res.status).toBe(402);
+  });
+
+  test('does NOT include requiredAmountUSD in basic-mode 402 response', async () => {
+    const res = await request(buildBasicModeApp()).get('/test/basic');
+    expect(res.status).toBe(402);
+    expect(res.body).not.toHaveProperty('requiredAmountUSD');
+  });
+
+  test('backward-compat: verifyX402Payment(number) uses premium mode', async () => {
+    injectTestCaches();
+    const payer = 'BackCompatPayerAddr11111111111111111111111';
+    const token = signTestToken({ amount: 0.11, currency: 'USD', payer });
+    const app   = express();
+    app.use(express.json());
+    app.post('/test/compat', BASIC_TEST_RATE_LIMIT, verifyX402Payment(0.11), (req, res) => {
+      res.json({ payerAddress: req.x402.payerAddress, amountUSD: req.x402.amountUSD });
+    });
+    const res = await request(app).post('/test/compat').set('x402-payment', token);
+    expect(res.status).toBe(200);
+    expect(res.body.payerAddress).toBe(payer);
+    expect(res.body.amountUSD).toBe(0.11);
+  });
+
+  test('premium mode sets amountUSD in req.x402', async () => {
+    injectTestCaches();
+    const payer = 'AmountUSDTestPayer111111111111111111111111';
+    const token = signTestToken({ amount: 0.11, currency: 'USD', payer });
+    const app   = express();
+    app.use(express.json());
+    app.post('/test/amount', BASIC_TEST_RATE_LIMIT, verifyX402Payment({ mode: 'premium', expectedAmountUSD: 0.11 }), (req, res) => {
+      res.json({ payerAddress: req.x402.payerAddress, amountUSD: req.x402.amountUSD });
+    });
+    const res = await request(app).post('/test/amount').set('x402-payment', token);
+    expect(res.status).toBe(200);
+    expect(res.body.amountUSD).toBe(0.11);
+    expect(res.body.payerAddress).toBe(payer);
+  });
+
+  test('premium mode with SOL currency sets amountUSD to (sol_amount * price)', async () => {
+    // 0.001 SOL * $150/SOL = $0.15, which is above the $0.11 minimum → payment accepted
+    injectTestCaches(); // price = $150/SOL
+    const payer = 'SolAmountPayer111111111111111111111111111';
+    const token = signTestToken({ amount: 0.001, currency: 'SOL', payer });
+    const app   = express();
+    app.use(express.json());
+    app.post('/test/sol', BASIC_TEST_RATE_LIMIT, verifyX402Payment({ mode: 'premium', expectedAmountUSD: 0.11 }), (req, res) => {
+      res.json({ amountUSD: req.x402.amountUSD });
+    });
+    const res = await request(app).post('/test/sol').set('x402-payment', token);
+    expect(res.status).toBe(200);
+    expect(res.body.amountUSD).toBeCloseTo(0.15); // 0.001 * 150
+  });
+});

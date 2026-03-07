@@ -994,31 +994,10 @@ app.post('/api/wallets', submitRateLimit, async (req, res) => {
 
 /**
  * PREMIUM ENDPOINT (x402 REQUIRED)
+ * Uses basic mode (timingSafeEqual against X402_PAYMENT_SECRET) for
+ * backward compatibility with existing payment integrations.
  */
-app.get('/api/wallets/:address/premium', async (req, res) => {
-
-  const paid = req.headers['x402-payment'];
-  const validPaymentToken = process.env.X402_PAYMENT_SECRET;
-
-  if (!paid || !validPaymentToken) {
-    return res.status(402).json({
-      message: 'Payment required via x402'
-    });
-  }
-
-  // Use timing-safe comparison to prevent timing attacks
-  try {
-    const paidBuf = Buffer.from(paid);
-    const validBuf = Buffer.from(validPaymentToken);
-    if (paidBuf.length !== validBuf.length || !crypto.timingSafeEqual(paidBuf, validBuf)) {
-      return res.status(402).json({
-        message: 'Payment required via x402'
-      });
-    }
-  } catch {
-    return res.status(402).json({ message: 'Payment required via x402' });
-  }
-
+app.get('/api/wallets/:address/premium', verifyX402Payment({ mode: 'basic' }), async (req, res) => {
   try {
     const wallet = await Wallet.findOne({
       walletAddress: req.params.address,
