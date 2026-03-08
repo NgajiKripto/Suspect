@@ -256,9 +256,9 @@ bot.onText(/\/edit_premium(?:\s+(.+))?/, async (msg, match) => {
 
   let wallet;
   if (/^\d+$/.test(query)) {
-    wallet = await Wallet.findOne({ caseNumber: parseInt(query, 10), status: 'verified' });
+    wallet = await Wallet.findOne({ caseNumber: parseInt(query, 10), status: 'verified' }).select('+premiumForensics');
   } else if (WALLET_ADDRESS_REGEX.test(query)) {
-    wallet = await Wallet.findOne({ walletAddress: query, status: 'verified' });
+    wallet = await Wallet.findOne({ walletAddress: query, status: 'verified' }).select('+premiumForensics');
   } else {
     await bot.sendMessage(chatId, '❌ Invalid input. Provide a numeric case number or a valid Solana wallet address.');
     return;
@@ -446,9 +446,9 @@ bot.on('message', async (msg) => {
 
   let wallet;
   if (/^\d+$/.test(firstLine)) {
-    wallet = await Wallet.findOne({ caseNumber: parseInt(firstLine, 10), status: 'verified' });
+    wallet = await Wallet.findOne({ caseNumber: parseInt(firstLine, 10), status: 'verified' }).select('+premiumForensics');
   } else if (WALLET_ADDRESS_REGEX.test(firstLine)) {
-    wallet = await Wallet.findOne({ walletAddress: firstLine, status: 'verified' });
+    wallet = await Wallet.findOne({ walletAddress: firstLine, status: 'verified' }).select('+premiumForensics');
   } else {
     await bot.sendMessage(
       chatId,
@@ -588,7 +588,7 @@ bot.on('callback_query', async (query) => {
     }
     pendingPremiumData.delete(id);
 
-    const wallet = await Wallet.findById(pendingData.walletId);
+    const wallet = await Wallet.findById(pendingData.walletId).select('+premiumForensics');
     if (!wallet) {
       return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
     }
@@ -677,7 +677,7 @@ bot.on('callback_query', async (query) => {
     const fieldName = id.slice(0, sepIdx);
     const walletId  = id.slice(sepIdx + 1);
 
-    const wallet = await Wallet.findById(walletId);
+    const wallet = await Wallet.findById(walletId).select('+premiumForensics');
     if (!wallet) {
       return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
     }
@@ -731,7 +731,7 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
-    const wallet = await Wallet.findById(confirmData.walletId);
+    const wallet = await Wallet.findById(confirmData.walletId).select('+premiumForensics');
     if (!wallet) {
       return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
     }
@@ -796,7 +796,7 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
-    const wallet = await Wallet.findById(bulkData.walletId);
+    const wallet = await Wallet.findById(bulkData.walletId).select('+premiumForensics');
     if (!wallet) {
       return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
     }
@@ -884,8 +884,10 @@ function premiumQueryGate(req, res, next) {
 
 app.get('/api/wallets/:address', premiumQueryGate, async (req, res) => {
   try {
-    const includePremium = req.query.include === 'premium' && req.x402?.valid;
-    const selectFields   = includePremium ? '-__v' : '-forensic -premiumForensics -__v';
+    const hasPremiumAccess = req.query.include === 'premium' && req.x402?.valid;
+    const selectFields = hasPremiumAccess
+      ? '-forensic -__v +premiumForensics'
+      : '-forensic -__v';
 
     const wallet = await Wallet.findOne({
       walletAddress: req.params.address,
@@ -894,7 +896,7 @@ app.get('/api/wallets/:address', premiumQueryGate, async (req, res) => {
 
     if (!wallet) return res.status(404).json({ message: 'Not found' });
 
-    res.json(wallet);
+    res.json(wallet.toPublicJSON(hasPremiumAccess));
   } catch (err) {
     console.error('GET /api/wallets/:address error:', err.message);
     res.status(500).json({ message: 'Internal server error' });
@@ -909,7 +911,7 @@ app.post('/api/wallets/:address/premium/access', verifyX402Payment(0.11), async 
     const wallet = await Wallet.findOne({
       walletAddress: req.params.address,
       status: 'verified'
-    });
+    }).select('+premiumForensics');
 
     if (!wallet) return res.status(404).json({ message: 'Not found' });
 
@@ -1002,7 +1004,7 @@ app.get('/api/wallets/:address/premium', verifyX402Payment({ mode: 'basic' }), a
     const wallet = await Wallet.findOne({
       walletAddress: req.params.address,
       status: 'verified'
-    });
+    }).select('+premiumForensics');
 
     if (!wallet) return res.status(404).json({ message: 'Not found' });
 
@@ -1038,7 +1040,7 @@ app.post('/api/admin/wallets/:address/premium-forensics', async (req, res) => {
   }
 
   try {
-    const wallet = await Wallet.findOne({ walletAddress: req.params.address });
+    const wallet = await Wallet.findOne({ walletAddress: req.params.address }).select('+premiumForensics');
     if (!wallet) return res.status(404).json({ message: 'Not found' });
 
     const {
@@ -1142,7 +1144,7 @@ app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, requireA
 
   // ── Persist update ─────────────────────────────────────────────────────────
   try {
-    const wallet = await Wallet.findOne({ walletAddress: req.params.address });
+    const wallet = await Wallet.findOne({ walletAddress: req.params.address }).select('+premiumForensics');
     if (!wallet) return res.status(404).json({ success: false, message: 'Not found' });
 
     const existing = wallet.premiumForensics ? wallet.premiumForensics.toObject() : {};

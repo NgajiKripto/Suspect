@@ -2597,3 +2597,106 @@ describe('33. Error messages — no internal logic or secrets leak', () => {
     expect(resPrem.body.error).toBe('Payment Required');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe('34. Wallet model — validateSolanaBase58 helper', () => {
+  const { validateSolanaBase58 } = require('../models/Wallet');
+
+  test('returns true for a valid 44-char Solana Base58 address', () => {
+    expect(validateSolanaBase58('So11111111111111111111111111111111111111112')).toBe(true);
+  });
+
+  test('returns true for a valid 32-char address (minimum length)', () => {
+    expect(validateSolanaBase58('11111111111111111111111111111111')).toBe(true);
+  });
+
+  test('returns false for an address containing invalid character 0', () => {
+    expect(validateSolanaBase58('S0111111111111111111111111111111111111111112')).toBe(false);
+  });
+
+  test('returns false for an address containing invalid character O', () => {
+    expect(validateSolanaBase58('SO11111111111111111111111111111111111111112')).toBe(false);
+  });
+
+  test('returns false for an address shorter than 32 chars', () => {
+    expect(validateSolanaBase58('1111111111111111111111111111111')).toBe(false);
+  });
+
+  test('returns false for an address longer than 44 chars', () => {
+    expect(validateSolanaBase58('So1111111111111111111111111111111111111111234')).toBe(false);
+  });
+
+  test('returns false for an empty string', () => {
+    expect(validateSolanaBase58('')).toBe(false);
+  });
+
+  test('returns false for a non-string input', () => {
+    expect(validateSolanaBase58(null)).toBe(false);
+    expect(validateSolanaBase58(undefined)).toBe(false);
+    expect(validateSolanaBase58(42)).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe('35. Wallet model — toPublicJSON method', () => {
+  const mongoose = require('mongoose');
+
+  // Build a minimal in-memory Wallet document without a real DB connection.
+  // We import the model but never call .save() or interact with MongoDB.
+  const Wallet = require('../models/Wallet');
+
+  function makeDoc(overrides = {}) {
+    const doc = new Wallet({
+      walletAddress: 'So11111111111111111111111111111111111111112',
+      status: 'verified',
+      riskScore: 95,
+      ...overrides
+    });
+    // Manually attach a premiumForensics object so we can test the method
+    // even without a real DB query.
+    doc.premiumForensics = {
+      addLiquidityValue: '45.2 SOL',
+      removeLiquidityValue: '0.3 SOL',
+      walletFunding: 'Tornado Cash',
+      tokensCreated: ['TokenAddr1111111111111111111111111111111111'],
+      forensicNotes: 'Pattern detected',
+      crossProjectLinks: ['RelatedAddr111111111111111111111111111111111'],
+      updatedAt: null
+    };
+    return doc;
+  }
+
+  test('returns an object without premiumForensics when hasPremiumAccess is false', () => {
+    const doc    = makeDoc();
+    const result = doc.toPublicJSON(false);
+    expect(result).not.toHaveProperty('premiumForensics');
+  });
+
+  test('returns an object without premiumForensics when hasPremiumAccess is undefined', () => {
+    const doc    = makeDoc();
+    const result = doc.toPublicJSON();
+    expect(result).not.toHaveProperty('premiumForensics');
+  });
+
+  test('returns premiumForensics when hasPremiumAccess is true', () => {
+    const doc    = makeDoc();
+    const result = doc.toPublicJSON(true);
+    expect(result).toHaveProperty('premiumForensics');
+    expect(result.premiumForensics).toHaveProperty('addLiquidityValue', '45.2 SOL');
+    expect(result.premiumForensics).toHaveProperty('walletFunding', 'Tornado Cash');
+  });
+
+  test('always includes public fields like walletAddress and status', () => {
+    const doc    = makeDoc();
+    const result = doc.toPublicJSON(false);
+    expect(result).toHaveProperty('walletAddress', 'So11111111111111111111111111111111111111112');
+    expect(result).toHaveProperty('status', 'verified');
+    expect(result).toHaveProperty('riskScore', 95);
+  });
+
+  test('does not include __v in output', () => {
+    const doc    = makeDoc();
+    const result = doc.toPublicJSON(false);
+    expect(result).not.toHaveProperty('__v');
+  });
+});
