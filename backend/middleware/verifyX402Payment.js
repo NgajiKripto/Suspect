@@ -276,7 +276,7 @@ function verifyX402Payment(options = {}) {
         logPaymentAttempt({ ...logBase, result: 'insufficient_amount', amountUSD, required: expectedAmountUSD });
         return res.status(402).json({
           error:   'Payment Required',
-          message: `Insufficient payment. Required: $${expectedAmountUSD} USD, provided: $${amountUSD.toFixed(6)} USD`
+          message: `Insufficient payment - upgrade required. Required: $${expectedAmountUSD} USD, provided: $${amountUSD.toFixed(6)} USD`
         });
       }
 
