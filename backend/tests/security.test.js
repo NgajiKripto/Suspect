@@ -2998,3 +2998,230 @@ describe("36. requireAccess — unified access-control middleware factory", () =
     });
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// 37. formatWalletResponse — response utility
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('37. formatWalletResponse — response utility', () => {
+  const { formatWalletResponse, escapeHtml } = require('../utils/response');
+
+  const TOKEN_ADDR   = 'TokenAddr1111111111111111111111111111111111'; // 44 chars
+  const WALLET_ADDR  = 'So11111111111111111111111111111111111111112'; // 44 chars
+  const RELATED_ADDR = 'RelatedAddr111111111111111111111111111111111'; // 44 chars
+
+  // Build a plain wallet object (no Mongoose methods) for unit tests.
+  function makeWallet(overrides = {}) {
+    return {
+      walletAddress: WALLET_ADDR,
+      status: 'verified',
+      riskScore: 95,
+      caseNumber: 1,
+      projectName: 'Test Project',
+      tokenAddress: TOKEN_ADDR,
+      evidence: {
+        txHash: 'SomeTxHash11111111111111111111111111111111',
+        solscanLink: 'https://solscan.io/tx/SomeTxHash',
+        description: 'Rug pull detected',
+        submittedAt: new Date('2024-01-01')
+      },
+      __v: 0,
+      forensic: {
+        liquidityBefore: 100000,
+        liquidityAfter: 0,
+        drainDurationHours: 2,
+        detectedPattern: ['liquidity_removal'],
+        walletFunding: 'Binance'
+      },
+      premiumForensics: {
+        addLiquidityValue: '45.2 SOL',
+        removeLiquidityValue: '0.3 SOL',
+        walletFunding: 'Tornado Cash',
+        tokensCreated: [TOKEN_ADDR],
+        forensicNotes: 'Repeat offender',
+        crossProjectLinks: [RELATED_ADDR],
+        updatedAt: new Date('2024-02-01')
+      },
+      createdAt: new Date('2024-01-01'),
+      updatedAt: new Date('2024-01-15'),
+      ...overrides
+    };
+  }
+
+  // ── 37a. Without premium access ───────────────────────────────────────────
+  describe('37a. without premium access (default)', () => {
+    test('does not include premiumForensics in the response', () => {
+      const result = formatWalletResponse(makeWallet());
+      expect(result).not.toHaveProperty('premiumForensics');
+    });
+
+    test('includes meta with hasPremiumData: false and lastPremiumUpdate: null', () => {
+      const result = formatWalletResponse(makeWallet());
+      expect(result.meta).toEqual({ hasPremiumData: false, lastPremiumUpdate: null });
+    });
+
+    test('meta.hasPremiumData is false even when premiumForensics data is present in the document', () => {
+      const result = formatWalletResponse(makeWallet(), { hasPremiumAccess: false });
+      expect(result.meta.hasPremiumData).toBe(false);
+    });
+
+    test('excludes __v field', () => {
+      const result = formatWalletResponse(makeWallet());
+      expect(result).not.toHaveProperty('__v');
+    });
+
+    test('excludes raw forensic sub-document', () => {
+      const result = formatWalletResponse(makeWallet());
+      expect(result).not.toHaveProperty('forensic');
+    });
+
+    test('includes public fields: walletAddress, status, riskScore, caseNumber', () => {
+      const result = formatWalletResponse(makeWallet());
+      expect(result.walletAddress).toBe(WALLET_ADDR);
+      expect(result.status).toBe('verified');
+      expect(result.riskScore).toBe(95);
+      expect(result.caseNumber).toBe(1);
+    });
+  });
+
+  // ── 37b. With premium access ──────────────────────────────────────────────
+  describe('37b. with premium access', () => {
+    test('includes premiumForensics in the response', () => {
+      const result = formatWalletResponse(makeWallet(), { hasPremiumAccess: true });
+      expect(result).toHaveProperty('premiumForensics');
+    });
+
+    test('meta.hasPremiumData is true', () => {
+      const result = formatWalletResponse(makeWallet(), { hasPremiumAccess: true });
+      expect(result.meta.hasPremiumData).toBe(true);
+    });
+
+    test('meta.lastPremiumUpdate equals premiumForensics.updatedAt', () => {
+      const updatedAt = new Date('2024-02-01');
+      const result = formatWalletResponse(makeWallet(), { hasPremiumAccess: true });
+      expect(result.meta.lastPremiumUpdate).toEqual(updatedAt);
+    });
+
+    test('tokensCreated are formatted as { address, solscanLink } objects', () => {
+      const result = formatWalletResponse(makeWallet(), { hasPremiumAccess: true });
+      const tokens = result.premiumForensics.tokensCreated;
+      expect(Array.isArray(tokens)).toBe(true);
+      expect(tokens[0]).toMatchObject({
+        address: TOKEN_ADDR,
+        solscanLink: `https://solscan.io/token/${TOKEN_ADDR}`
+      });
+    });
+
+    test('excludes __v and forensic even with premium access', () => {
+      const result = formatWalletResponse(makeWallet(), { hasPremiumAccess: true });
+      expect(result).not.toHaveProperty('__v');
+      expect(result).not.toHaveProperty('forensic');
+    });
+
+    test('includes all non-token premiumForensics fields', () => {
+      const result = formatWalletResponse(makeWallet(), { hasPremiumAccess: true });
+      const pf = result.premiumForensics;
+      expect(pf).toHaveProperty('addLiquidityValue', '45.2 SOL');
+      expect(pf).toHaveProperty('removeLiquidityValue', '0.3 SOL');
+      expect(pf).toHaveProperty('walletFunding', 'Tornado Cash');
+      expect(pf).toHaveProperty('forensicNotes', 'Repeat offender');
+      expect(Array.isArray(pf.crossProjectLinks)).toBe(true);
+    });
+  });
+
+  // ── 37c. XSS escaping ─────────────────────────────────────────────────────
+  describe('37c. XSS escaping', () => {
+    test('escapes <script> injection in projectName', () => {
+      const result = formatWalletResponse(makeWallet({ projectName: '<script>alert(1)</script>' }));
+      expect(result.projectName).toBe('&lt;script&gt;alert(1)&lt;/script&gt;');
+      expect(result.projectName).not.toContain('<script>');
+    });
+
+    test('escapes double-quote attribute injection in projectName', () => {
+      const result = formatWalletResponse(makeWallet({ projectName: '" onmouseover="evil()"' }));
+      expect(result.projectName).toContain('&quot;');
+      expect(result.projectName).not.toContain('"');
+    });
+
+    test('escapes XSS in premiumForensics.walletFunding when premium access is granted', () => {
+      const wallet = makeWallet({
+        premiumForensics: { ...makeWallet().premiumForensics, walletFunding: '<img src=x onerror=alert(1)>' }
+      });
+      const result = formatWalletResponse(wallet, { hasPremiumAccess: true });
+      expect(result.premiumForensics.walletFunding).not.toContain('<img');
+      expect(result.premiumForensics.walletFunding).toContain('&lt;img');
+    });
+
+    test('escapes XSS in premiumForensics.forensicNotes when premium access is granted', () => {
+      const wallet = makeWallet({
+        premiumForensics: { ...makeWallet().premiumForensics, forensicNotes: '<b>bold</b>' }
+      });
+      const result = formatWalletResponse(wallet, { hasPremiumAccess: true });
+      expect(result.premiumForensics.forensicNotes).toBe('&lt;b&gt;bold&lt;/b&gt;');
+    });
+
+    test('valid Base58 token address passes through unchanged (no HTML chars to escape)', () => {
+      const result = formatWalletResponse(makeWallet(), { hasPremiumAccess: true });
+      expect(result.premiumForensics.tokensCreated[0].address).toBe(TOKEN_ADDR);
+    });
+
+    test('escapeHtml encodes all five HTML-special characters', () => {
+      expect(escapeHtml('& < > " \'')).toBe('&amp; &lt; &gt; &quot; &#039;');
+    });
+
+    test('escapeHtml returns empty string for null', () => {
+      expect(escapeHtml(null)).toBe('');
+    });
+
+    test('escapeHtml returns empty string for undefined', () => {
+      expect(escapeHtml(undefined)).toBe('');
+    });
+  });
+
+  // ── 37d. Edge cases ───────────────────────────────────────────────────────
+  describe('37d. edge cases', () => {
+    test('handles wallet with null premiumForensics when hasPremiumAccess is true', () => {
+      const wallet = makeWallet({ premiumForensics: null });
+      const result = formatWalletResponse(wallet, { hasPremiumAccess: true });
+      expect(result).not.toHaveProperty('premiumForensics');
+      expect(result.meta.hasPremiumData).toBe(false);
+      expect(result.meta.lastPremiumUpdate).toBeNull();
+    });
+
+    test('handles empty tokensCreated array gracefully', () => {
+      const wallet = makeWallet({
+        premiumForensics: { ...makeWallet().premiumForensics, tokensCreated: [] }
+      });
+      const result = formatWalletResponse(wallet, { hasPremiumAccess: true });
+      expect(result.premiumForensics.tokensCreated).toEqual([]);
+    });
+
+    test('works with plain objects that have no toObject() method', () => {
+      const plain = { walletAddress: WALLET_ADDR, status: 'verified', riskScore: 50, __v: 0 };
+      const result = formatWalletResponse(plain);
+      expect(result.walletAddress).toBe(WALLET_ADDR);
+      expect(result.status).toBe('verified');
+      expect(result).not.toHaveProperty('__v');
+    });
+
+    test('meta.lastPremiumUpdate is null when premiumForensics.updatedAt is null', () => {
+      const wallet = makeWallet({
+        premiumForensics: { ...makeWallet().premiumForensics, updatedAt: null }
+      });
+      const result = formatWalletResponse(wallet, { hasPremiumAccess: true });
+      expect(result.meta.lastPremiumUpdate).toBeNull();
+    });
+
+    test('without premium access produces no premiumForensics even if field is present in source', () => {
+      // Demonstrates the key difference: same wallet, different access level
+      const wallet = makeWallet();
+      const withoutPremium = formatWalletResponse(wallet, { hasPremiumAccess: false });
+      const withPremium    = formatWalletResponse(wallet, { hasPremiumAccess: true });
+
+      expect(withoutPremium).not.toHaveProperty('premiumForensics');
+      expect(withPremium).toHaveProperty('premiumForensics');
+      expect(withoutPremium.meta.hasPremiumData).toBe(false);
+      expect(withPremium.meta.hasPremiumData).toBe(true);
+    });
+  });
+});
