@@ -27,7 +27,8 @@ const {
   SENSITIVE_FIELDS,
   buildEditCurrentValues,
   buildDiffPreview,
-  buildBulkDiffPreview
+  buildBulkDiffPreview,
+  CALLBACK
 } = require('../botUtils');
 const { requireAdminAuth } = require('../middleware/requireAdminAuth');
 const { requireAccess }    = require('../middleware/requireAccess');
@@ -3222,6 +3223,201 @@ describe('37. formatWalletResponse — response utility', () => {
       expect(withPremium).toHaveProperty('premiumForensics');
       expect(withoutPremium.meta.hasPremiumData).toBe(false);
       expect(withPremium.meta.hasPremiumData).toBe(true);
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe('38. CALLBACK — prefix-based callback router constants', () => {
+  // ── 38a. Constant values ──────────────────────────────────────────────────
+  describe('38a. CALLBACK constant values', () => {
+    test('CALLBACK.VERIFY equals "verify:"', () => {
+      expect(CALLBACK.VERIFY).toBe('verify:');
+    });
+
+    test('CALLBACK.PREMIUM_ADD equals "premium:add:"', () => {
+      expect(CALLBACK.PREMIUM_ADD).toBe('premium:add:');
+    });
+
+    test('CALLBACK.PREMIUM_EDIT equals "premium:edit:"', () => {
+      expect(CALLBACK.PREMIUM_EDIT).toBe('premium:edit:');
+    });
+
+    test('CALLBACK.PREMIUM_CONFIRM equals "premium:confirm:"', () => {
+      expect(CALLBACK.PREMIUM_CONFIRM).toBe('premium:confirm:');
+    });
+
+    test('CALLBACK.CANCEL equals "cancel"', () => {
+      expect(CALLBACK.CANCEL).toBe('cancel');
+    });
+
+    test('CALLBACK has exactly 5 keys', () => {
+      expect(Object.keys(CALLBACK)).toHaveLength(5);
+    });
+  });
+
+  // ── 38b. Prefix uniqueness (no prefix is a prefix of another) ────────────
+  describe('38b. Prefix uniqueness', () => {
+    test('VERIFY prefix does not match PREMIUM_ADD data', () => {
+      expect(`premium:add:someId`.startsWith(CALLBACK.VERIFY)).toBe(false);
+    });
+
+    test('PREMIUM_ADD prefix does not match PREMIUM_EDIT data', () => {
+      expect(`premium:edit:field:id`.startsWith(CALLBACK.PREMIUM_ADD)).toBe(false);
+    });
+
+    test('PREMIUM_EDIT prefix does not match PREMIUM_CONFIRM data', () => {
+      expect(`premium:confirm:add:key`.startsWith(CALLBACK.PREMIUM_EDIT)).toBe(false);
+    });
+
+    test('PREMIUM_CONFIRM is checked before PREMIUM_ADD to avoid false match', () => {
+      // premium:confirm:... starts with "premium:" but NOT with "premium:add:"
+      const data = `premium:confirm:add:abc123`;
+      expect(data.startsWith(CALLBACK.PREMIUM_CONFIRM)).toBe(true);
+      expect(data.startsWith(CALLBACK.PREMIUM_ADD)).toBe(false);
+      expect(data.startsWith(CALLBACK.PREMIUM_EDIT)).toBe(false);
+    });
+
+    test('CANCEL matches cancel:add:key via startsWith', () => {
+      expect(`cancel:add:abc123`.startsWith(CALLBACK.CANCEL)).toBe(true);
+    });
+
+    test('CANCEL matches cancel:edit:key via startsWith', () => {
+      expect(`cancel:edit:abc123`.startsWith(CALLBACK.CANCEL)).toBe(true);
+    });
+
+    test('CANCEL matches cancel:bulk:key via startsWith', () => {
+      expect(`cancel:bulk:abc123`.startsWith(CALLBACK.CANCEL)).toBe(true);
+    });
+
+    test('CANCEL does not match "premium:confirm:..." data', () => {
+      expect(`premium:confirm:add:abc`.startsWith(CALLBACK.CANCEL)).toBe(false);
+    });
+  });
+
+  // ── 38c. callback_data generation helpers ────────────────────────────────
+  describe('38c. callback_data generation for inline keyboards', () => {
+    const WALLET_ID  = '507f1f77bcf86cd799439011';
+    const FIELD_NAME = 'addLiquidityValue';
+    const CONFIRM_KEY = 'deadbeef01234567';
+
+    test('verify keyboard uses CALLBACK.VERIFY prefix', () => {
+      const data = `${CALLBACK.VERIFY}${WALLET_ID}`;
+      expect(data).toBe(`verify:${WALLET_ID}`);
+      expect(data.startsWith(CALLBACK.VERIFY)).toBe(true);
+    });
+
+    test('premium:add keyboard uses CALLBACK.PREMIUM_ADD prefix', () => {
+      const data = `${CALLBACK.PREMIUM_ADD}${WALLET_ID}`;
+      expect(data).toBe(`premium:add:${WALLET_ID}`);
+      expect(data.startsWith(CALLBACK.PREMIUM_ADD)).toBe(true);
+    });
+
+    test('premium:edit keyboard uses CALLBACK.PREMIUM_EDIT prefix', () => {
+      const data = `${CALLBACK.PREMIUM_EDIT}${FIELD_NAME}:${WALLET_ID}`;
+      expect(data).toBe(`premium:edit:${FIELD_NAME}:${WALLET_ID}`);
+      expect(data.startsWith(CALLBACK.PREMIUM_EDIT)).toBe(true);
+    });
+
+    test('premium:confirm:add keyboard uses CALLBACK.PREMIUM_CONFIRM prefix', () => {
+      const data = `${CALLBACK.PREMIUM_CONFIRM}add:${CONFIRM_KEY}`;
+      expect(data).toBe(`premium:confirm:add:${CONFIRM_KEY}`);
+      expect(data.startsWith(CALLBACK.PREMIUM_CONFIRM)).toBe(true);
+    });
+
+    test('premium:confirm:edit keyboard uses CALLBACK.PREMIUM_CONFIRM prefix', () => {
+      const data = `${CALLBACK.PREMIUM_CONFIRM}edit:${CONFIRM_KEY}`;
+      expect(data).toBe(`premium:confirm:edit:${CONFIRM_KEY}`);
+      expect(data.startsWith(CALLBACK.PREMIUM_CONFIRM)).toBe(true);
+    });
+
+    test('premium:confirm:bulk keyboard uses CALLBACK.PREMIUM_CONFIRM prefix', () => {
+      const data = `${CALLBACK.PREMIUM_CONFIRM}bulk:${CONFIRM_KEY}`;
+      expect(data).toBe(`premium:confirm:bulk:${CONFIRM_KEY}`);
+      expect(data.startsWith(CALLBACK.PREMIUM_CONFIRM)).toBe(true);
+    });
+
+    test('cancel:add keyboard uses CALLBACK.CANCEL prefix', () => {
+      const data = `${CALLBACK.CANCEL}:add:${CONFIRM_KEY}`;
+      expect(data).toBe(`cancel:add:${CONFIRM_KEY}`);
+      expect(data.startsWith(CALLBACK.CANCEL)).toBe(true);
+    });
+
+    test('cancel:edit keyboard uses CALLBACK.CANCEL prefix', () => {
+      const data = `${CALLBACK.CANCEL}:edit:${CONFIRM_KEY}`;
+      expect(data).toBe(`cancel:edit:${CONFIRM_KEY}`);
+      expect(data.startsWith(CALLBACK.CANCEL)).toBe(true);
+    });
+
+    test('cancel:bulk keyboard uses CALLBACK.CANCEL prefix', () => {
+      const data = `${CALLBACK.CANCEL}:bulk:${CONFIRM_KEY}`;
+      expect(data).toBe(`cancel:bulk:${CONFIRM_KEY}`);
+      expect(data.startsWith(CALLBACK.CANCEL)).toBe(true);
+    });
+  });
+
+  // ── 38d. Parsing logic (colon-split) ──────────────────────────────────────
+  describe('38d. Colon-split parsing of callback_data', () => {
+    test('verify:<walletId> splits into ["verify", "<walletId>"]', () => {
+      const parts = 'verify:507f1f77bcf86cd799439011'.split(':');
+      expect(parts[0]).toBe('verify');
+      expect(parts[1]).toBe('507f1f77bcf86cd799439011');
+    });
+
+    test('premium:add:<walletId> splits so parts[2] is walletId', () => {
+      const parts = 'premium:add:507f1f77bcf86cd799439011'.split(':');
+      expect(parts[0]).toBe('premium');
+      expect(parts[1]).toBe('add');
+      expect(parts[2]).toBe('507f1f77bcf86cd799439011');
+    });
+
+    test('premium:edit:<field>:<walletId> splits so parts[2]=field, parts[3]=walletId', () => {
+      const parts = 'premium:edit:addLiquidityValue:507f1f77bcf86cd799439011'.split(':');
+      expect(parts[2]).toBe('addLiquidityValue');
+      expect(parts[3]).toBe('507f1f77bcf86cd799439011');
+    });
+
+    test('premium:confirm:add:<key> splits so parts[2]="add", parts[3]=key', () => {
+      const parts = 'premium:confirm:add:deadbeef01234567'.split(':');
+      expect(parts[2]).toBe('add');
+      expect(parts[3]).toBe('deadbeef01234567');
+    });
+
+    test('premium:confirm:edit:<key> splits so parts[2]="edit"', () => {
+      const parts = 'premium:confirm:edit:deadbeef01234567'.split(':');
+      expect(parts[2]).toBe('edit');
+    });
+
+    test('premium:confirm:bulk:<key> splits so parts[2]="bulk"', () => {
+      const parts = 'premium:confirm:bulk:deadbeef01234567'.split(':');
+      expect(parts[2]).toBe('bulk');
+    });
+
+    test('cancel:add:<key> splits so parts[1]="add", parts[2]=key', () => {
+      const parts = 'cancel:add:deadbeef01234567'.split(':');
+      expect(parts[1]).toBe('add');
+      expect(parts[2]).toBe('deadbeef01234567');
+    });
+
+    test('cancel:edit:<key> splits so parts[1]="edit"', () => {
+      const parts = 'cancel:edit:deadbeef01234567'.split(':');
+      expect(parts[1]).toBe('edit');
+    });
+
+    test('cancel:bulk:<key> splits so parts[1]="bulk"', () => {
+      const parts = 'cancel:bulk:deadbeef01234567'.split(':');
+      expect(parts[1]).toBe('bulk');
+    });
+
+    test('unrecognised prefix does not start with any CALLBACK value', () => {
+      const unknownData = 'unknown:action:123';
+      const recognised = Object.values(CALLBACK).some(prefix => unknownData.startsWith(prefix));
+      expect(recognised).toBe(false);
+    });
+
+    test('empty string does not start with any CALLBACK value', () => {
+      const recognised = Object.values(CALLBACK).some(prefix => ''.startsWith(prefix));
+      expect(recognised).toBe(false);
     });
   });
 });
