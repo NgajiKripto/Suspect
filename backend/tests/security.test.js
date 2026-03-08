@@ -33,6 +33,7 @@ const {
 const { requireAdminAuth } = require('../middleware/requireAdminAuth');
 const { requireAccess }    = require('../middleware/requireAccess');
 const { writeAuditLog, hashIp, AUDIT_LOG_PATH } = require('../auditLog');
+const workflowState = require('../utils/workflowState');
 
 // ─── Shared regex (mirrors server.js) ────────────────────────────────────────
 const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -3418,6 +3419,167 @@ describe('38. CALLBACK — prefix-based callback router constants', () => {
     test('empty string does not start with any CALLBACK value', () => {
       const recognised = Object.values(CALLBACK).some(prefix => ''.startsWith(prefix));
       expect(recognised).toBe(false);
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe('39. workflowState — multi-step premium input state manager', () => {
+  // Reset module state between tests by clearing everything after each test
+  afterEach(() => {
+    workflowState.clear('chat1');
+    workflowState.clear('chat2');
+    workflowState.clear(42);
+  });
+
+  // ── 39a. get / set / clear ────────────────────────────────────────────────
+  describe('39a. get / set / clear operations', () => {
+    test('get returns null for an unknown chatId', () => {
+      expect(workflowState.get('nonexistent')).toBeNull();
+    });
+
+    test('set stores state and get retrieves it', () => {
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {} });
+      const state = workflowState.get('chat1');
+      expect(state).not.toBeNull();
+      expect(state.workflow).toBe('premium_add');
+      expect(state.currentField).toBe('addLiquidityValue');
+    });
+
+    test('set injects startedAt timestamp automatically', () => {
+      const before = Date.now();
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {} });
+      const after  = Date.now();
+      const state  = workflowState.get('chat1');
+      expect(state.startedAt).toBeGreaterThanOrEqual(before);
+      expect(state.startedAt).toBeLessThanOrEqual(after);
+    });
+
+    test('set preserves a caller-supplied startedAt', () => {
+      const ts = 1_000_000;
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {}, startedAt: ts });
+      expect(workflowState.get('chat1').startedAt).toBe(ts);
+    });
+
+    test('clear removes state and get returns null afterwards', () => {
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {} });
+      workflowState.clear('chat1');
+      expect(workflowState.get('chat1')).toBeNull();
+    });
+
+    test('clear on an unknown chatId is a no-op (does not throw)', () => {
+      expect(() => workflowState.clear('nonexistent')).not.toThrow();
+    });
+
+    test('chatId is coerced to string — numeric and string keys are equivalent', () => {
+      workflowState.set(42, { workflow: 'premium_add', currentField: 'walletFunding', collectedData: {} });
+      expect(workflowState.get('42')).not.toBeNull();
+      expect(workflowState.get(42)).not.toBeNull();
+    });
+
+    test('set overwrites an existing state for the same chatId', () => {
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {} });
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'walletFunding', collectedData: { addLiquidityValue: '5 SOL' } });
+      const state = workflowState.get('chat1');
+      expect(state.currentField).toBe('walletFunding');
+      expect(state.collectedData).toEqual({ addLiquidityValue: '5 SOL' });
+    });
+
+    test('states for different chatIds are independent', () => {
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {} });
+      workflowState.set('chat2', { workflow: 'premium_add', currentField: 'forensicNotes', collectedData: {} });
+      expect(workflowState.get('chat1').currentField).toBe('addLiquidityValue');
+      expect(workflowState.get('chat2').currentField).toBe('forensicNotes');
+      workflowState.clear('chat1');
+      expect(workflowState.get('chat1')).toBeNull();
+      expect(workflowState.get('chat2')).not.toBeNull();
+    });
+  });
+
+  // ── 39b. touch ────────────────────────────────────────────────────────────
+  describe('39b. touch — extend expiry without mutating state', () => {
+    test('touch on a known chatId does not throw', () => {
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {} });
+      expect(() => workflowState.touch('chat1')).not.toThrow();
+    });
+
+    test('touch leaves state contents unchanged', () => {
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: { x: 1 } });
+      workflowState.touch('chat1');
+      const state = workflowState.get('chat1');
+      expect(state.currentField).toBe('addLiquidityValue');
+      expect(state.collectedData).toEqual({ x: 1 });
+    });
+
+    test('touch on an unknown chatId is a no-op (does not throw)', () => {
+      expect(() => workflowState.touch('nonexistent')).not.toThrow();
+    });
+  });
+
+  // ── 39c. cleanup ─────────────────────────────────────────────────────────
+  describe('39c. cleanup — remove stale entries', () => {
+    test('cleanup removes entries older than WORKFLOW_EXPIRE_MS', () => {
+      const staleTs = Date.now() - workflowState.WORKFLOW_EXPIRE_MS - 1;
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {}, startedAt: staleTs });
+      workflowState.cleanup();
+      expect(workflowState.get('chat1')).toBeNull();
+    });
+
+    test('cleanup keeps entries younger than WORKFLOW_EXPIRE_MS', () => {
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {} });
+      workflowState.cleanup();
+      expect(workflowState.get('chat1')).not.toBeNull();
+    });
+
+    test('cleanup is a no-op on an empty store (does not throw)', () => {
+      expect(() => workflowState.cleanup()).not.toThrow();
+    });
+
+    test('cleanup only removes stale entries, leaving fresh ones intact', () => {
+      const staleTs = Date.now() - workflowState.WORKFLOW_EXPIRE_MS - 1;
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {}, startedAt: staleTs });
+      workflowState.set('chat2', { workflow: 'premium_add', currentField: 'forensicNotes',     collectedData: {} });
+      workflowState.cleanup();
+      expect(workflowState.get('chat1')).toBeNull();
+      expect(workflowState.get('chat2')).not.toBeNull();
+    });
+  });
+
+  // ── 39d. WORKFLOW_EXPIRE_MS constant ─────────────────────────────────────
+  describe('39d. WORKFLOW_EXPIRE_MS constant', () => {
+    test('WORKFLOW_EXPIRE_MS equals 15 minutes in milliseconds', () => {
+      expect(workflowState.WORKFLOW_EXPIRE_MS).toBe(15 * 60 * 1000);
+    });
+  });
+
+  // ── 39e. auto-expiry via setTimeout (fake timers) ─────────────────────────
+  describe('39e. auto-expiry via setTimeout', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => {
+      workflowState.clear('chat1');
+      jest.useRealTimers();
+    });
+
+    test('state is removed automatically after WORKFLOW_EXPIRE_MS', () => {
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {} });
+      expect(workflowState.get('chat1')).not.toBeNull();
+      jest.advanceTimersByTime(workflowState.WORKFLOW_EXPIRE_MS + 1);
+      expect(workflowState.get('chat1')).toBeNull();
+    });
+
+    test('calling set resets the expiry timer', () => {
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'addLiquidityValue', collectedData: {} });
+      // Advance halfway through the expiry window
+      jest.advanceTimersByTime(workflowState.WORKFLOW_EXPIRE_MS / 2);
+      // Update state (should reset the timer)
+      workflowState.set('chat1', { workflow: 'premium_add', currentField: 'walletFunding', collectedData: {} });
+      // Advance another half-window — total elapsed > one full EXPIRE_MS from first set
+      jest.advanceTimersByTime(workflowState.WORKFLOW_EXPIRE_MS / 2);
+      // Should still exist because the timer was reset
+      expect(workflowState.get('chat1')).not.toBeNull();
+      // Now advance past the second full window
+      jest.advanceTimersByTime(workflowState.WORKFLOW_EXPIRE_MS);
+      expect(workflowState.get('chat1')).toBeNull();
     });
   });
 });
