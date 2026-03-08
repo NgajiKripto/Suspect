@@ -16,6 +16,7 @@ const { requireAdminAuth } = require('./middleware/requireAdminAuth');
 const { requireAccess } = require('./middleware/requireAccess');
 const { writeAuditLog, hashIp, AUDIT_LOG_PATH } = require('./auditLog');
 const { formatWalletResponse } = require('./utils/response');
+const workflowState = require('./utils/workflowState');
 const {
   parsePremiumInput,
   validatePremiumFields,
@@ -109,6 +110,29 @@ const pendingBulkEdit = new Map();
 const adminEditRateLimiter = new Map();
 const EDIT_RATE_LIMIT     = 5;
 const EDIT_RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+// Ordered sequence of fields for the multi-step premium_add workflow
+const PREMIUM_WORKFLOW_FIELDS = [
+  'addLiquidityValue',
+  'removeLiquidityValue',
+  'walletFunding',
+  'tokensCreated',
+  'forensicNotes',
+  'crossProjectLinks'
+];
+
+// Fields whose values are comma-separated lists → parsed as arrays
+const ARRAY_PREMIUM_FIELDS = new Set(['tokensCreated', 'crossProjectLinks']);
+
+// Step-by-step prompt shown to the admin for each field
+const WORKFLOW_FIELD_PROMPTS = {
+  addLiquidityValue:    'Step 1/6 — ADD_LIQ\nEnter add-liquidity value (e.g. 45.2 SOL).\nSend /skip to leave blank.',
+  removeLiquidityValue: 'Step 2/6 — REM_LIQ\nEnter remove-liquidity value (e.g. 0.3 SOL).\nSend /skip to leave blank.',
+  walletFunding:        'Step 3/6 — FUNDING\nEnter wallet funding source (plain text, max 200 chars, no HTML).\nSend /skip to leave blank.',
+  tokensCreated:        'Step 4/6 — TOKENS\nEnter token addresses as comma-separated Solana Base58 values.\nSend /skip to leave blank.',
+  forensicNotes:        'Step 5/6 — NOTES\nEnter free-form forensic notes.\nSend /skip to leave blank.',
+  crossProjectLinks:    'Step 6/6 — LINKS\nEnter related wallet addresses as comma-separated Solana Base58 values.\nSend /skip to leave blank.'
+};
 
 /**
  * Check and increment the per-admin edit rate limit.
@@ -359,6 +383,123 @@ bot.onText(/\/canceledit/, async (msg) => {
   }
 });
 
+// /cancel command — abort any active multi-step premium_add workflow
+bot.onText(/^\/cancel$/, async (msg) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+  const adminChatId = String(msg.chat.id);
+  const state = workflowState.get(adminChatId);
+  if (state) {
+    workflowState.clear(adminChatId);
+    await bot.sendMessage(chatId, '❌ Premium data workflow cancelled.');
+  } else {
+    await bot.sendMessage(chatId, 'No active workflow to cancel. Use /canceledit to cancel a field-edit prompt.');
+  }
+});
+
+/**
+ * Send the premium data confirmation preview after all workflow fields are
+ * collected.  Stores the collected data in pendingPremiumData so that the
+ * existing handlePremiumConfirm('add') handler can persist it on confirmation.
+ *
+ * @param {string} adminChatId  Stringified chat.id of the admin session.
+ * @param {object} state        Completed workflow state object containing:
+ *   - walletId      {string}  Mongoose ObjectId of the wallet document
+ *   - walletAddress {string}  On-chain wallet address
+ *   - caseNumber    {number}  Case number shown in the confirmation preview
+ *   - collectedData {object}  Map of camelCase field names → validated values
+ */
+async function showWorkflowConfirmation(adminChatId, state) {
+  const { walletId, walletAddress, caseNumber, collectedData } = state;
+  const confirmKey = crypto.randomBytes(8).toString('hex');
+  pendingPremiumData.set(confirmKey, {
+    walletId,
+    walletAddress,
+    caseNumber,
+    parsed: collectedData
+  });
+  setTimeout(() => pendingPremiumData.delete(confirmKey), 5 * 60 * 1000);
+
+  const preview = buildPremiumPreview(caseNumber, walletAddress, collectedData);
+  await bot.sendMessage(chatId, preview, {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '✅ Confirm', callback_data: `premium:confirm:add:${confirmKey}` },
+        { text: '❌ Cancel',  callback_data: `cancel:add:${confirmKey}` }
+      ]]
+    }
+  });
+}
+
+// Multi-step premium workflow: receive and validate each field reply in sequence
+bot.on('message', async (msg) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+  if (!msg.text) return;
+
+  const adminChatId = String(msg.chat.id);
+  const state = workflowState.get(adminChatId);
+  if (!state || state.workflow !== 'premium_add') return;
+
+  const text = msg.text.trim();
+
+  // /cancel is handled by the dedicated onText handler above; re-check here as
+  // a safety net so the workflow guard doesn't consume it and leave the session
+  // open if the onText handler fires second.
+  if (text === '/cancel') return;
+
+  // /skip — leave the current field blank and advance to the next
+  if (text === '/skip') {
+    const currentIndex = PREMIUM_WORKFLOW_FIELDS.indexOf(state.currentField);
+    const nextIndex    = currentIndex + 1;
+
+    if (nextIndex >= PREMIUM_WORKFLOW_FIELDS.length) {
+      workflowState.clear(adminChatId);
+      await showWorkflowConfirmation(adminChatId, state);
+    } else {
+      const nextField = PREMIUM_WORKFLOW_FIELDS[nextIndex];
+      workflowState.set(adminChatId, Object.assign({}, state, { currentField: nextField }));
+      await bot.sendMessage(chatId, WORKFLOW_FIELD_PROMPTS[nextField]);
+    }
+    return;
+  }
+
+  // Ignore other slash commands while workflow is active
+  if (text.startsWith('/')) return;
+
+  // Parse the current field value (array fields require comma-splitting)
+  const { currentField } = state;
+  let parsedValue;
+  if (ARRAY_PREMIUM_FIELDS.has(currentField)) {
+    parsedValue = text.split(',').map(s => s.trim()).filter(Boolean);
+  } else {
+    parsedValue = text;
+  }
+
+  // Validate using the same rules as the PATCH endpoint
+  const errors = validatePremiumFields({ [currentField]: parsedValue });
+  if (errors.length > 0) {
+    await bot.sendMessage(
+      chatId,
+      `❌ Invalid value:\n\n${errors.map(e => `• ${e}`).join('\n')}\n\nPlease try again or send /skip to leave blank.`
+    );
+    return;
+  }
+
+  // Store validated value and advance to next field
+  const collectedData = Object.assign({}, state.collectedData, { [currentField]: parsedValue });
+  const currentIndex  = PREMIUM_WORKFLOW_FIELDS.indexOf(currentField);
+  const nextIndex     = currentIndex + 1;
+
+  if (nextIndex >= PREMIUM_WORKFLOW_FIELDS.length) {
+    // All 6 fields collected — show confirmation preview
+    workflowState.clear(adminChatId);
+    await showWorkflowConfirmation(adminChatId, Object.assign({}, state, { collectedData }));
+  } else {
+    const nextField = PREMIUM_WORKFLOW_FIELDS[nextIndex];
+    workflowState.set(adminChatId, Object.assign({}, state, { currentField: nextField, collectedData }));
+    await bot.sendMessage(chatId, WORKFLOW_FIELD_PROMPTS[nextField]);
+  }
+});
+
 // Handle new value entered for a specific field (when pendingFieldEdit is active)
 bot.on('message', async (msg) => {
   if (String(msg.chat.id) !== String(chatId)) return;
@@ -378,7 +519,7 @@ bot.on('message', async (msg) => {
 
   // Parse value: TOKENS and LINKS need to be split into arrays
   let newValue;
-  if (fieldName === 'tokensCreated' || fieldName === 'crossProjectLinks') {
+  if (ARRAY_PREMIUM_FIELDS.has(fieldName)) {
     newValue = msg.text.split(',').map(s => s.trim()).filter(Boolean);
   } else {
     newValue = msg.text.trim();
@@ -602,11 +743,11 @@ async function handleSetPremium(query, parts) {
 
 /**
  * handle: premium:add:<walletId>   (CALLBACK.PREMIUM_ADD)
- * Start the structured ADD_LIQ/REM_LIQ input flow for a wallet.
+ * Start the multi-step premium data entry workflow for a wallet.
  *
  * Example callback_data: `premium:add:${wallet._id}`
- * After this handler runs, the admin's next message (containing ADD_LIQ: etc.)
- * is picked up by the pendingPremiumEntry message handler.
+ * Initializes workflowState for the admin's chat so that subsequent
+ * plain-text replies are handled field-by-field by the workflow handler.
  */
 async function handlePremiumAdd(query, parts) {
   // parts: ['premium', 'add', '<walletId>']
@@ -615,28 +756,37 @@ async function handlePremiumAdd(query, parts) {
   if (!wallet) {
     return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
   }
-  // Store pending entry so the next matching message is attributed to this wallet
-  const timeoutId = setTimeout(
-    () => pendingPremiumEntry.delete(String(chatId)),
-    10 * 60 * 1000
-  );
-  pendingPremiumEntry.set(String(chatId), {
+
+  const adminChatId = String(chatId);
+
+  // Guard: if a workflow is already in progress, do not silently overwrite it.
+  const existing = workflowState.get(adminChatId);
+  if (existing) {
+    await bot.answerCallbackQuery(query.id, { text: '⚠️ Workflow already active.' });
+    await bot.sendMessage(
+      chatId,
+      `⚠️ You already have an active premium data entry in progress (Case #${existing.caseNumber}).\n\n` +
+      `Send /cancel to discard it, then click [📝 Add Premium Data] again.`
+    );
+    return true;
+  }
+
+  // Initialize multi-step workflow state (auto-expires after 15 minutes of inactivity)
+  workflowState.set(adminChatId, {
+    workflow:      'premium_add',
     walletId:      wallet._id,
     walletAddress: wallet.walletAddress,
     caseNumber:    wallet.caseNumber,
-    timeoutId
+    currentField:  PREMIUM_WORKFLOW_FIELDS[0],
+    collectedData: {}
   });
-  await bot.answerCallbackQuery(query.id, { text: 'Send premium data now.' });
+
+  await bot.answerCallbackQuery(query.id, { text: 'Starting premium data entry…' });
   await bot.sendMessage(
     chatId,
-    `📝 Enter premium forensic data for Case #${wallet.caseNumber} in the format:\n\n` +
-    `ADD_LIQ: 45.2 SOL\n` +
-    `REM_LIQ: 0.3 SOL\n` +
-    `FUNDING: CEX withdrawal (Binance)\n` +
-    `TOKENS: Token1Addr,Token2Addr\n` +
-    `NOTES: Repeated rugpull pattern across 3 projects\n` +
-    `LINKS: RelatedWallet1,RelatedWallet2\n\n` +
-    `Use /premium_help for field rules.`
+    `📝 Premium data entry for Case #${wallet.caseNumber}\n(${wallet.walletAddress})\n\n` +
+    `Answer each prompt in sequence.\nSend /skip to leave a field blank.\nSend /cancel to abort.\n\n` +
+    WORKFLOW_FIELD_PROMPTS[PREMIUM_WORKFLOW_FIELDS[0]]
   );
   return true;
 }
@@ -966,6 +1116,9 @@ bot.on('callback_query', async (query) => {
   }
 });
 
+// Periodic cleanup: remove any workflow states that have exceeded 15 minutes.
+// The per-entry setTimeout already handles expiry; this job is a safety net.
+setInterval(() => workflowState.cleanup(), 5 * 60 * 1000);
 
 /**
  * ==========================
