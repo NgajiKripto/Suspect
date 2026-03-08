@@ -30,6 +30,7 @@ const {
   buildBulkDiffPreview
 } = require('../botUtils');
 const { requireAdminAuth } = require('../middleware/requireAdminAuth');
+const { requireAccess }    = require('../middleware/requireAccess');
 const { writeAuditLog, hashIp, AUDIT_LOG_PATH } = require('../auditLog');
 
 // ─── Shared regex (mirrors server.js) ────────────────────────────────────────
@@ -2698,5 +2699,302 @@ describe('35. Wallet model — toPublicJSON method', () => {
     const doc    = makeDoc();
     const result = doc.toPublicJSON(false);
     expect(result).not.toHaveProperty('__v');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 36. requireAccess middleware factory
+// ════════════════════════════════════════════════════════════════════════════
+
+describe("36. requireAccess — unified access-control middleware factory", () => {
+  // Re-use the shared ES256 key pair / injectTestCaches / signTestToken helpers
+  // declared at line ~941 in this file.
+
+  const ADMIN_WALLET  = 'RAAdminWallet111111111111111111111111111111'; // 43 chars
+  const OTHER_WALLET  = 'RAOtherWallet11111111111111111111111111111';  // 42 chars
+  const TG_TOKEN      = 'ra-tg-admin-token-secret';
+
+  // High-limit rate limiter keeps CodeQL happy for test apps
+  const RA_RATE_LIMIT = rateLimit({
+    windowMs: 60 * 60 * 1000, max: 10000,
+    standardHeaders: false, legacyHeaders: false
+  });
+
+  // ── Helper: minimal test app that mounts a requireAccess-protected route ───
+  function buildAccessApp(level, options = {}, responseBody = (req) => ({ ok: true, isAdmin: req.isAdmin, hasPremiumAccess: req.hasPremiumAccess, adminAuth: req.adminAuth })) {
+    const app = express();
+    app.use(express.json());
+    app.get('/test/access', RA_RATE_LIMIT, requireAccess(level, options), (req, res) => {
+      res.json(responseBody(req));
+    });
+    return app;
+  }
+
+  // ── 36a. Public level ──────────────────────────────────────────────────────
+  describe('36a. level: public', () => {
+    test('always calls next() with no headers', async () => {
+      const res = await request(buildAccessApp('public')).get('/test/access');
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+    });
+
+    test('calls next() even when unrecognised headers are present', async () => {
+      const res = await request(buildAccessApp('public'))
+        .get('/test/access')
+        .set('x402-payment', 'anything')
+        .set('x-telegram-admin-token', 'anything');
+      expect(res.status).toBe(200);
+    });
+  });
+
+  // ── 36b. Premium level ─────────────────────────────────────────────────────
+  describe('36b. level: premium', () => {
+    beforeEach(() => injectTestCaches());
+    afterEach(() => {
+      _caches.jwks  = { keys: null, fetchedAt: 0 };
+      _caches.price = { priceUSD: null, fetchedAt: 0 };
+    });
+
+    test('returns 402 when x402-payment header is absent', async () => {
+      const res = await request(buildAccessApp('premium', { amountUSD: 0.11 }))
+        .get('/test/access');
+      expect(res.status).toBe(402);
+      expect(res.body).toHaveProperty('error', 'Payment Required');
+    });
+
+    test('returns 402 for an invalid JWT', async () => {
+      const res = await request(buildAccessApp('premium', { amountUSD: 0.11 }))
+        .get('/test/access')
+        .set('x402-payment', 'not-a-jwt');
+      expect(res.status).toBe(402);
+    });
+
+    test('returns 402 when payment amount is insufficient', async () => {
+      const token = signTestToken({ amount: 0.05, currency: 'USD', payer: OTHER_WALLET });
+      const res   = await request(buildAccessApp('premium', { amountUSD: 0.11 }))
+        .get('/test/access')
+        .set('x402-payment', token);
+      expect(res.status).toBe(402);
+      expect(res.body.message).toMatch(/Insufficient payment/);
+    });
+
+    test('sets req.hasPremiumAccess = true on valid payment', async () => {
+      const payer = 'PremiumPayerAddr111111111111111111111111111';
+      const token = signTestToken({ amount: 0.11, currency: 'USD', payer });
+      const res   = await request(buildAccessApp('premium', { amountUSD: 0.11 }))
+        .get('/test/access')
+        .set('x402-payment', token);
+      expect(res.status).toBe(200);
+      expect(res.body.hasPremiumAccess).toBe(true);
+    });
+
+    test('default amountUSD is 0.11 when option is omitted', async () => {
+      const payer = 'DefaultAmountPayer11111111111111111111111111';
+      const token = signTestToken({ amount: 0.11, currency: 'USD', payer });
+      const res   = await request(buildAccessApp('premium'))
+        .get('/test/access')
+        .set('x402-payment', token);
+      expect(res.status).toBe(200);
+      expect(res.body.hasPremiumAccess).toBe(true);
+    });
+
+    test('returns 402 when amount is exactly below threshold', async () => {
+      const token = signTestToken({ amount: 0.10, currency: 'USD', payer: OTHER_WALLET });
+      const res   = await request(buildAccessApp('premium', { amountUSD: 0.11 }))
+        .get('/test/access')
+        .set('x402-payment', token);
+      expect(res.status).toBe(402);
+    });
+  });
+
+  // ── 36c. Admin level — Telegram source ────────────────────────────────────
+  describe('36c. level: admin — telegram source', () => {
+    beforeEach(() => { process.env.TELEGRAM_ADMIN_TOKEN = TG_TOKEN; });
+    afterEach(() => { delete process.env.TELEGRAM_ADMIN_TOKEN; });
+
+    test('returns 401 when no admin header is provided', async () => {
+      const res = await request(buildAccessApp('admin', { adminSources: ['telegram'] }))
+        .get('/test/access');
+      expect(res.status).toBe(401);
+      expect(res.body).toHaveProperty('message', 'Authentication required');
+    });
+
+    test('returns 403 when x-telegram-admin-token is wrong', async () => {
+      const res = await request(buildAccessApp('admin', { adminSources: ['telegram'] }))
+        .get('/test/access')
+        .set('x-telegram-admin-token', 'wrong-token');
+      expect(res.status).toBe(403);
+      expect(res.body).toHaveProperty('message', 'Forbidden');
+    });
+
+    test('sets req.isAdmin = true when Telegram token is correct', async () => {
+      const res = await request(buildAccessApp('admin', { adminSources: ['telegram'] }))
+        .get('/test/access')
+        .set('x-telegram-admin-token', TG_TOKEN);
+      expect(res.status).toBe(200);
+      expect(res.body.isAdmin).toBe(true);
+    });
+
+    test('sets req.adminAuth.source = "telegram" on success', async () => {
+      const res = await request(buildAccessApp('admin', { adminSources: ['telegram'] }))
+        .get('/test/access')
+        .set('x-telegram-admin-token', TG_TOKEN);
+      expect(res.status).toBe(200);
+      expect(res.body.adminAuth).toMatchObject({ source: 'telegram' });
+    });
+
+    test('returns 403 when TELEGRAM_ADMIN_TOKEN env var is not set', async () => {
+      delete process.env.TELEGRAM_ADMIN_TOKEN;
+      const res = await request(buildAccessApp('admin', { adminSources: ['telegram'] }))
+        .get('/test/access')
+        .set('x-telegram-admin-token', TG_TOKEN);
+      expect(res.status).toBe(403);
+    });
+  });
+
+  // ── 36d. Admin level — JWT source ─────────────────────────────────────────
+  describe('36d. level: admin — jwt source', () => {
+    beforeEach(() => {
+      injectTestCaches();
+      process.env.ADMIN_WALLET_ADDRESSES = ADMIN_WALLET;
+    });
+    afterEach(() => {
+      delete process.env.ADMIN_WALLET_ADDRESSES;
+      _caches.jwks  = { keys: null, fetchedAt: 0 };
+      _caches.price = { priceUSD: null, fetchedAt: 0 };
+    });
+
+    function signAdminToken(payer) {
+      return signTestToken({ amount: 0.11, currency: 'USD', payer });
+    }
+
+    test('returns 401 when no x402-payment header is provided', async () => {
+      const res = await request(buildAccessApp('admin', { adminSources: ['jwt'] }))
+        .get('/test/access');
+      expect(res.status).toBe(401);
+      expect(res.body).toHaveProperty('message', 'Authentication required');
+    });
+
+    test('returns 403 for an invalid JWT string', async () => {
+      const res = await request(buildAccessApp('admin', { adminSources: ['jwt'] }))
+        .get('/test/access')
+        .set('x402-payment', 'not-a-jwt');
+      expect(res.status).toBe(403);
+    });
+
+    test('returns 403 when payer is not in ADMIN_WALLET_ADDRESSES', async () => {
+      const token = signAdminToken(OTHER_WALLET);
+      const res   = await request(buildAccessApp('admin', { adminSources: ['jwt'] }))
+        .get('/test/access')
+        .set('x402-payment', token);
+      expect(res.status).toBe(403);
+    });
+
+    test('sets req.isAdmin = true when JWT payer is in whitelist', async () => {
+      const token = signAdminToken(ADMIN_WALLET);
+      const res   = await request(buildAccessApp('admin', { adminSources: ['jwt'] }))
+        .get('/test/access')
+        .set('x402-payment', token);
+      expect(res.status).toBe(200);
+      expect(res.body.isAdmin).toBe(true);
+    });
+
+    test('sets req.adminAuth with source "api" and payerAddress on JWT success', async () => {
+      const token = signAdminToken(ADMIN_WALLET);
+      const res   = await request(buildAccessApp('admin', { adminSources: ['jwt'] }))
+        .get('/test/access')
+        .set('x402-payment', token);
+      expect(res.status).toBe(200);
+      expect(res.body.adminAuth).toMatchObject({ source: 'api', payerAddress: ADMIN_WALLET });
+    });
+
+    test('returns 403 when ADMIN_WALLET_ADDRESSES is empty', async () => {
+      process.env.ADMIN_WALLET_ADDRESSES = '';
+      const token = signAdminToken(ADMIN_WALLET);
+      const res   = await request(buildAccessApp('admin', { adminSources: ['jwt'] }))
+        .get('/test/access')
+        .set('x402-payment', token);
+      expect(res.status).toBe(403);
+    });
+  });
+
+  // ── 36e. Admin level — combined telegram + jwt sources ────────────────────
+  describe('36e. level: admin — combined telegram + jwt sources', () => {
+    beforeEach(() => {
+      injectTestCaches();
+      process.env.TELEGRAM_ADMIN_TOKEN   = TG_TOKEN;
+      process.env.ADMIN_WALLET_ADDRESSES = ADMIN_WALLET;
+    });
+    afterEach(() => {
+      delete process.env.TELEGRAM_ADMIN_TOKEN;
+      delete process.env.ADMIN_WALLET_ADDRESSES;
+      _caches.jwks  = { keys: null, fetchedAt: 0 };
+      _caches.price = { priceUSD: null, fetchedAt: 0 };
+    });
+
+    test('returns 401 when neither telegram nor jwt header is present', async () => {
+      const res = await request(buildAccessApp('admin', { adminSources: ['telegram', 'jwt'] }))
+        .get('/test/access');
+      expect(res.status).toBe(401);
+    });
+
+    test('succeeds with Telegram token alone when JWT is not provided', async () => {
+      const res = await request(buildAccessApp('admin', { adminSources: ['telegram', 'jwt'] }))
+        .get('/test/access')
+        .set('x-telegram-admin-token', TG_TOKEN);
+      expect(res.status).toBe(200);
+      expect(res.body.isAdmin).toBe(true);
+      expect(res.body.adminAuth.source).toBe('telegram');
+    });
+
+    test('succeeds with valid JWT when Telegram token is not provided', async () => {
+      const token = signTestToken({ amount: 0.11, currency: 'USD', payer: ADMIN_WALLET });
+      const res   = await request(buildAccessApp('admin', { adminSources: ['telegram', 'jwt'] }))
+        .get('/test/access')
+        .set('x402-payment', token);
+      expect(res.status).toBe(200);
+      expect(res.body.isAdmin).toBe(true);
+      expect(res.body.adminAuth.source).toBe('api');
+    });
+
+    test('falls through to JWT when Telegram token is wrong but JWT is valid', async () => {
+      const token = signTestToken({ amount: 0.11, currency: 'USD', payer: ADMIN_WALLET });
+      const res   = await request(buildAccessApp('admin', { adminSources: ['telegram', 'jwt'] }))
+        .get('/test/access')
+        .set('x-telegram-admin-token', 'wrong-tg-token')
+        .set('x402-payment', token);
+      expect(res.status).toBe(200);
+      expect(res.body.isAdmin).toBe(true);
+      expect(res.body.adminAuth.source).toBe('api');
+    });
+
+    test('returns 403 when both Telegram token and JWT are wrong', async () => {
+      const token = signTestToken({ amount: 0.11, currency: 'USD', payer: OTHER_WALLET });
+      const res   = await request(buildAccessApp('admin', { adminSources: ['telegram', 'jwt'] }))
+        .get('/test/access')
+        .set('x-telegram-admin-token', 'wrong-tg-token')
+        .set('x402-payment', token);
+      expect(res.status).toBe(403);
+    });
+
+    test('Telegram succeeds first; JWT not evaluated', async () => {
+      // Even if JWT would fail (wrong payer), Telegram success should grant access
+      const token = signTestToken({ amount: 0.11, currency: 'USD', payer: OTHER_WALLET });
+      const res   = await request(buildAccessApp('admin', { adminSources: ['telegram', 'jwt'] }))
+        .get('/test/access')
+        .set('x-telegram-admin-token', TG_TOKEN)
+        .set('x402-payment', token);
+      expect(res.status).toBe(200);
+      expect(res.body.adminAuth.source).toBe('telegram');
+    });
+  });
+
+  // ── 36f. Factory guard: invalid level throws ───────────────────────────────
+  describe('36f. factory guard', () => {
+    test('throws synchronously for an invalid level string', () => {
+      expect(() => requireAccess('superadmin')).toThrow(
+        /requireAccess: invalid level "superadmin"/
+      );
+    });
   });
 });
