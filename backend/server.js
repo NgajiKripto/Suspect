@@ -13,6 +13,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const Wallet = require('./models/wallet');
 const { verifyX402Payment } = require('./middleware/verifyX402Payment');
 const { requireAdminAuth } = require('./middleware/requireAdminAuth');
+const { requireAccess } = require('./middleware/requireAccess');
 const { writeAuditLog, hashIp, AUDIT_LOG_PATH } = require('./auditLog');
 const {
   parsePremiumInput,
@@ -873,18 +874,18 @@ app.get('/api/wallets', async (req, res) => {
 
 // PUBLIC DETAIL
 // Accepts optional ?include=premium query param.
-// When ?include=premium is present, verifyX402Payment is applied and
+// When ?include=premium is present, requireAccess('premium') is applied and
 // the response includes forensic + premiumForensics fields.
 function premiumQueryGate(req, res, next) {
   if (req.query.include === 'premium') {
-    return verifyX402Payment(0.11)(req, res, next);
+    return requireAccess('premium', { amountUSD: 0.11 })(req, res, next);
   }
-  next();
+  return requireAccess('public')(req, res, next);
 }
 
 app.get('/api/wallets/:address', premiumQueryGate, async (req, res) => {
   try {
-    const hasPremiumAccess = req.query.include === 'premium' && req.x402?.valid;
+    const hasPremiumAccess = req.hasPremiumAccess === true;
     const selectFields = hasPremiumAccess
       ? '-forensic -__v +premiumForensics'
       : '-forensic -__v';
@@ -1075,10 +1076,10 @@ app.post('/api/admin/wallets/:address/premium-forensics', async (req, res) => {
 
 /**
  * ADMIN PATCH ENDPOINT — Partial update of premiumForensics
- * Authorization: x402-payment JWT must be valid and payer must be in ADMIN_WALLET_ADDRESSES.
+ * Authorization: EITHER Telegram admin token OR x402-payment JWT (admin wallet whitelist).
  * Rate limited: 20 updates per hour per admin token.
  */
-app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, requireAdminAuth('api'), async (req, res) => {
+app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, requireAccess('admin', { adminSources: ['telegram', 'jwt'] }), async (req, res) => {
   // ── Destructure only the 6 allowed premiumForensics fields ─────────────────
   const {
     addLiquidityValue,
@@ -1164,12 +1165,16 @@ app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, requireA
     await wallet.save();
 
     const timestamp = new Date().toISOString();
+    const changedBySource     = req.adminAuth.source;
+    const changedByIdentifier = req.adminAuth.payerAddress
+      ? `wallet:${req.adminAuth.payerAddress}`
+      : `${req.adminAuth.source}-admin`;
     writeAuditLog({
       timestamp,
       action:        'premium_update',
       walletAddress: req.params.address,
       caseNumber:    wallet.caseNumber,
-      changedBy:     { source: 'api', identifier: `wallet:${req.adminAuth.payerAddress}` },
+      changedBy:     { source: changedBySource, identifier: changedByIdentifier },
       fieldsChanged,
       before,
       after,
