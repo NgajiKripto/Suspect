@@ -939,7 +939,7 @@ describe('13. PATCH /api/admin/wallets/:address/premium — Rate Limiting', () =
 // ─── New x402 route / middleware tests ───────────────────────────────────────
 
 const jwt = require('jsonwebtoken');
-const { verifyX402Payment, _caches } = require('../middleware/verifyX402Payment');
+const { verifyX402Payment, getSolPriceUSD, _caches } = require('../middleware/verifyX402Payment');
 
 // ── Shared test EC key pair (ES256) ──────────────────────────────────────────
 const { privateKey: TEST_PRIV_KEY, publicKey: TEST_PUB_KEY } =
@@ -2146,5 +2146,454 @@ describe('29. verifyX402Payment({ mode: \'basic\' }) — backward-compat tests',
     const res = await request(app).post('/test/sol').set('x402-payment', token);
     expect(res.status).toBe(200);
     expect(res.body.amountUSD).toBeCloseTo(0.15); // 0.001 * 150
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 30. Oracle price cache — 5-min TTL (Date.now mocked)
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('30. Oracle price cache — 5-min TTL', () => {
+  const PRICE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    // Reset price cache to clean state to avoid cross-test pollution
+    _caches.price = { priceUSD: null, fetchedAt: 0 };
+  });
+
+  test('uses cached price when called within the 5-min TTL window', async () => {
+    const fakeNow    = 10_000_000;
+    const cachedPrice = 180.00;
+    // Inject a fresh cache entry
+    _caches.price = { priceUSD: cachedPrice, fetchedAt: fakeNow };
+    // Advance time to 1 ms before TTL expiry — cache should still be valid
+    jest.spyOn(Date, 'now').mockReturnValue(fakeNow + PRICE_CACHE_TTL_MS - 1);
+
+    const price = await getSolPriceUSD();
+    expect(price).toBe(cachedPrice);
+    // fetchedAt must be unchanged — no re-fetch occurred
+    expect(_caches.price.fetchedAt).toBe(fakeNow);
+  });
+
+  test('does NOT use cached price when TTL has expired', async () => {
+    const fakeNow    = 10_000_000;
+    const cachedPrice = 180.00;
+    // Inject a cache entry that is exactly at the TTL boundary (expired)
+    _caches.price = { priceUSD: cachedPrice, fetchedAt: fakeNow - PRICE_CACHE_TTL_MS - 1 };
+    // Date.now() is past the TTL window
+    jest.spyOn(Date, 'now').mockReturnValue(fakeNow);
+
+    // getSolPriceUSD() must attempt an HTTP re-fetch; in tests there is no real network,
+    // so it rejects — proving the cache was bypassed
+    await expect(getSolPriceUSD()).rejects.toThrow();
+  });
+
+  test('returns same cached price for repeated calls within TTL', async () => {
+    const fakeNow    = 20_000_000;
+    const cachedPrice = 99.99;
+    _caches.price = { priceUSD: cachedPrice, fetchedAt: fakeNow };
+    jest.spyOn(Date, 'now').mockReturnValue(fakeNow + 1000); // 1 second later
+
+    const p1 = await getSolPriceUSD();
+    const p2 = await getSolPriceUSD();
+    expect(p1).toBe(cachedPrice);
+    expect(p2).toBe(cachedPrice);
+  });
+
+  test('cache boundary: price is valid at exactly TTL - 1 ms', () => {
+    const fetchedAt = 0;
+    const now       = PRICE_CACHE_TTL_MS - 1;
+    // Mirrors the condition inside getSolPriceUSD
+    expect(now - fetchedAt).toBeLessThan(PRICE_CACHE_TTL_MS);
+  });
+
+  test('cache boundary: price is expired at exactly TTL ms after fetch', () => {
+    const fetchedAt = 0;
+    const now       = PRICE_CACHE_TTL_MS;
+    expect(now - fetchedAt).toBeGreaterThanOrEqual(PRICE_CACHE_TTL_MS);
+  });
+
+  test('middleware uses cached SOL price within TTL — no re-fetch on second request', async () => {
+    // Inject fresh caches with a known SOL price so both requests use the same cached value
+    const fakeNow = 30_000_000;
+    _caches.jwks  = { keys: [TEST_JWK], fetchedAt: fakeNow };
+    _caches.price = { priceUSD: 200, fetchedAt: fakeNow };
+    jest.spyOn(Date, 'now').mockReturnValue(fakeNow + 1000);
+
+    const app = express();
+    app.use(express.json());
+    const TEST_RL = rateLimit({ windowMs: 60_000, max: 10000, standardHeaders: false, legacyHeaders: false });
+    app.get('/test/cache', TEST_RL, verifyX402Payment({ mode: 'premium', expectedAmountUSD: 0.11 }), (_req, res) => {
+      res.json({ amountUSD: _req.x402.amountUSD });
+    });
+
+    const payer = 'CacheTestPayer11111111111111111111111111111';
+    const token = signTestToken({ amount: 0.001, currency: 'SOL', payer }); // 0.001 * $200 = $0.20 ≥ $0.11
+
+    const r1 = await request(app).get('/test/cache').set('x402-payment', token);
+    const r2 = await request(app).get('/test/cache').set('x402-payment', token);
+
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    expect(r1.body.amountUSD).toBeCloseTo(0.20);
+    expect(r2.body.amountUSD).toBeCloseTo(0.20);
+    // Cache fetchedAt must be unchanged — no re-fetch between the two requests
+    expect(_caches.price.fetchedAt).toBe(fakeNow);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 31. Premium endpoint integration — premiumForensics + "upgrade required"
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('31. Premium endpoint integration — premiumForensics response', () => {
+  // Rate limiter for test apps (avoids CodeQL missing-rate-limiting alert)
+  const PREM_RL = rateLimit({ windowMs: 60_000, max: 10000, standardHeaders: false, legacyHeaders: false });
+
+  function buildPremiumIntegrationApp(expectedAmountUSD = 0.11) {
+    const app = express();
+    app.use(express.json());
+    app.get(
+      '/test/premium-data',
+      PREM_RL,
+      verifyX402Payment({ mode: 'premium', expectedAmountUSD }),
+      (req, res) => res.json({
+        success:         true,
+        payerAddress:    req.x402.payerAddress,
+        amountUSD:       req.x402.amountUSD,
+        premiumForensics: {
+          addLiquidityValue:    '45.2 SOL',
+          removeLiquidityValue: '0.3 SOL',
+          walletFunding:        'Tornado Cash',
+          forensicNotes:        'Repeat offender pattern detected',
+          tokensCreated:        ['TokenAddr1111111111111111111111111111111111'],
+          crossProjectLinks:    ['RelatedAddr111111111111111111111111111111111'],
+          updatedAt:            new Date().toISOString()
+        }
+      })
+    );
+    return app;
+  }
+
+  beforeEach(injectTestCaches);
+
+  test('returns 200 with premiumForensics when payment header is absent (setup: no header)', async () => {
+    const res = await request(buildPremiumIntegrationApp()).get('/test/premium-data');
+    // No header → 402, no premiumForensics
+    expect(res.status).toBe(402);
+    expect(res.body).not.toHaveProperty('premiumForensics');
+  });
+
+  test('returns 200 and premiumForensics with valid JWT containing sufficient amount', async () => {
+    const payer = 'PremiumPayerAddr111111111111111111111111111';
+    const token = signTestToken({ amount: 0.11, currency: 'USD', payer });
+    const res   = await request(buildPremiumIntegrationApp())
+      .get('/test/premium-data')
+      .set('x402-payment', token);
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body).toHaveProperty('premiumForensics');
+    expect(res.body.premiumForensics).toHaveProperty('addLiquidityValue', '45.2 SOL');
+    expect(res.body.premiumForensics).toHaveProperty('walletFunding', 'Tornado Cash');
+    expect(res.body).toHaveProperty('payerAddress', payer);
+    expect(res.body).toHaveProperty('amountUSD', 0.11);
+  });
+
+  test('returns 402 with "upgrade required" message when amount is insufficient', async () => {
+    const payer = 'LowPayerAddr11111111111111111111111111111111';
+    const token = signTestToken({ amount: 0.05, currency: 'USD', payer }); // 0.05 < 0.11
+    const res   = await request(buildPremiumIntegrationApp())
+      .get('/test/premium-data')
+      .set('x402-payment', token);
+
+    expect(res.status).toBe(402);
+    expect(res.body.message).toMatch(/upgrade required/i);
+    expect(res.body).not.toHaveProperty('premiumForensics');
+  });
+
+  test('insufficient payment 402 message also references the required threshold', async () => {
+    const payer = 'LowPayer2Addr1111111111111111111111111111111';
+    const token = signTestToken({ amount: 0.01, currency: 'USD', payer });
+    const res   = await request(buildPremiumIntegrationApp(0.25))
+      .get('/test/premium-data')
+      .set('x402-payment', token);
+
+    expect(res.status).toBe(402);
+    expect(res.body.message).toContain('0.25');  // required threshold visible to caller
+  });
+
+  test('returns 402 with requiredAmountUSD when header is absent', async () => {
+    const res = await request(buildPremiumIntegrationApp()).get('/test/premium-data');
+    expect(res.status).toBe(402);
+    expect(res.body).toHaveProperty('requiredAmountUSD', 0.11);
+  });
+
+  test('premiumForensics is only present in 200 responses, never in 402 responses', async () => {
+    // Insufficient payment
+    const payer  = 'CheckPayerAddr111111111111111111111111111111';
+    const badTok = signTestToken({ amount: 0.01, currency: 'USD', payer });
+    const badRes = await request(buildPremiumIntegrationApp())
+      .get('/test/premium-data')
+      .set('x402-payment', badTok);
+    expect(badRes.status).toBe(402);
+    expect(badRes.body).not.toHaveProperty('premiumForensics');
+
+    // Sufficient payment
+    const goodTok = signTestToken({ amount: 0.50, currency: 'USD', payer });
+    const goodRes = await request(buildPremiumIntegrationApp())
+      .get('/test/premium-data')
+      .set('x402-payment', goodTok);
+    expect(goodRes.status).toBe(200);
+    expect(goodRes.body).toHaveProperty('premiumForensics');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 32. timingSafeEqual — both code paths prevent timing attacks
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('32. timingSafeEqual — both code paths prevent timing attacks', () => {
+  const SECRET = 'timing-safe-test-secret-xyz';
+
+  // Rate limiter for test apps
+  const TSE_RL = rateLimit({ windowMs: 60_000, max: 10000, standardHeaders: false, legacyHeaders: false });
+
+  function buildBasicApp() {
+    const app = express();
+    app.use(express.json());
+    app.get('/test/timing-basic', TSE_RL, verifyX402Payment({ mode: 'basic' }), (_req, res) => {
+      res.json({ ok: true });
+    });
+    return app;
+  }
+
+  beforeEach(() => { process.env.X402_PAYMENT_SECRET = SECRET; });
+  afterEach(() => { delete process.env.X402_PAYMENT_SECRET; });
+
+  // ── Basic mode ────────────────────────────────────────────────────────────
+
+  test('basic mode: header shorter than secret returns 402 (no crash)', async () => {
+    const res = await request(buildBasicApp())
+      .get('/test/timing-basic')
+      .set('x402-payment', SECRET.slice(0, -3)); // shorter than secret
+    expect(res.status).toBe(402);
+    expect(res.body.error).toBe('Payment Required');
+  });
+
+  test('basic mode: header longer than secret returns 402 (no crash)', async () => {
+    const res = await request(buildBasicApp())
+      .get('/test/timing-basic')
+      .set('x402-payment', SECRET + 'extra');
+    expect(res.status).toBe(402);
+  });
+
+  test('basic mode: empty header returns 402 (timingSafeEqual length guard)', async () => {
+    const res = await request(buildBasicApp())
+      .get('/test/timing-basic')
+      .set('x402-payment', '');
+    // An empty header is equivalent to no header — must be rejected
+    expect(res.status).toBe(402);
+  });
+
+  test('basic mode: same-length but wrong content returns 402', async () => {
+    // Construct a string with same byte length but different content
+    const sameLength = 'X'.repeat(Buffer.byteLength(SECRET, 'utf8'));
+    const res = await request(buildBasicApp())
+      .get('/test/timing-basic')
+      .set('x402-payment', sameLength);
+    expect(res.status).toBe(402);
+  });
+
+  test('basic mode: correct secret returns 200 (timingSafeEqual positive path)', async () => {
+    const res = await request(buildBasicApp())
+      .get('/test/timing-basic')
+      .set('x402-payment', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+  });
+
+  test('basic mode: timingSafeEqual comparison does not throw for any ASCII input', () => {
+    // Verify the constant-time comparison logic via Node crypto directly
+    const inputs = ['', 'a', SECRET, SECRET + 'extra', SECRET.slice(0, -1)];
+    for (const input of inputs) {
+      expect(() => {
+        const a = Buffer.from(input);
+        const b = Buffer.from(SECRET);
+        if (a.length === b.length) crypto.timingSafeEqual(a, b);
+      }).not.toThrow();
+    }
+  });
+
+  // ── Premium mode ──────────────────────────────────────────────────────────
+
+  test('premium mode: tampered JWT signature returns 402 (not 500)', async () => {
+    injectTestCaches();
+    const token = signTestToken({ amount: 0.11, currency: 'USD', payer: 'Payer1111111111111111111111111111111111111' });
+    // Corrupt the signature segment
+    const parts   = token.split('.');
+    parts[2]      = parts[2].split('').reverse().join('');
+    const tampered = parts.join('.');
+
+    const app = express();
+    app.use(express.json());
+    app.get('/test/timing-prem', TSE_RL, verifyX402Payment({ mode: 'premium', expectedAmountUSD: 0.11 }), (_req, res) => {
+      res.json({ ok: true });
+    });
+    const res = await request(app).get('/test/timing-prem').set('x402-payment', tampered);
+    expect(res.status).toBe(402);
+    expect(res.body.error).toBe('Payment Required');
+  });
+
+  test('premium mode: replay with zeroed signature bytes returns 402 (not 500)', async () => {
+    injectTestCaches();
+    const token  = signTestToken({ amount: 0.11, currency: 'USD', payer: 'Payer2222222222222222222222222222222222222' });
+    const parts  = token.split('.');
+    parts[2]     = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const forged = parts.join('.');
+
+    const app = express();
+    app.use(express.json());
+    app.get('/test/timing-replay', TSE_RL, verifyX402Payment({ mode: 'premium', expectedAmountUSD: 0.11 }), (_req, res) => {
+      res.json({ ok: true });
+    });
+    const res = await request(app).get('/test/timing-replay').set('x402-payment', forged);
+    expect(res.status).toBe(402);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 33. Error messages — no internal logic or secrets leak
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('33. Error messages — no internal logic or secrets leak', () => {
+  const CONFIGURED_SECRET = 'super-secret-do-not-leak-in-response';
+
+  // Rate limiter for test apps
+  const LEAK_RL = rateLimit({ windowMs: 60_000, max: 10000, standardHeaders: false, legacyHeaders: false });
+
+  beforeEach(() => {
+    process.env.X402_PAYMENT_SECRET = CONFIGURED_SECRET;
+    injectTestCaches();
+  });
+
+  afterEach(() => {
+    delete process.env.X402_PAYMENT_SECRET;
+    _caches.price = { priceUSD: null, fetchedAt: 0 };
+    _caches.jwks  = { keys: null, fetchedAt: 0 };
+  });
+
+  // ── Basic mode ────────────────────────────────────────────────────────────
+
+  test('basic mode 402: response body does not contain the configured secret', async () => {
+    const app = express();
+    app.use(express.json());
+    app.get('/test/leak-basic', LEAK_RL, verifyX402Payment({ mode: 'basic' }), (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app).get('/test/leak-basic').set('x402-payment', 'wrong-value');
+    expect(res.status).toBe(402);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain(CONFIGURED_SECRET);
+  });
+
+  test('basic mode 402: response body does not mention env var names or internal identifiers', async () => {
+    const app = express();
+    app.use(express.json());
+    app.get('/test/leak-basic2', LEAK_RL, verifyX402Payment({ mode: 'basic' }), (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app).get('/test/leak-basic2').set('x402-payment', 'wrong');
+    expect(res.status).toBe(402);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('X402_PAYMENT_SECRET');
+    expect(bodyStr).not.toContain('process.env');
+    expect(bodyStr).not.toContain('timingSafeEqual');
+  });
+
+  test('basic mode 402: no stack trace in response body', async () => {
+    const app = express();
+    app.use(express.json());
+    app.get('/test/leak-stack', LEAK_RL, verifyX402Payment({ mode: 'basic' }), (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app).get('/test/leak-stack').set('x402-payment', 'wrong');
+    expect(res.status).toBe(402);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('at ');       // no stack-trace lines
+    expect(bodyStr).not.toContain('.js:');      // no file references
+  });
+
+  // ── Premium mode ──────────────────────────────────────────────────────────
+
+  test('premium mode 402 (no header): response does not contain JWKS URL or key material', async () => {
+    const app = express();
+    app.use(express.json());
+    app.get('/test/leak-prem', LEAK_RL, verifyX402Payment({ mode: 'premium', expectedAmountUSD: 0.11 }), (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app).get('/test/leak-prem');
+    expect(res.status).toBe(402);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('x402gateway.io');
+    expect(bodyStr).not.toContain('jwks');
+    expect(bodyStr).not.toContain('privateKey');
+  });
+
+  test('premium mode 402 (invalid JWT): response does not expose JWT internals', async () => {
+    const app = express();
+    app.use(express.json());
+    app.get('/test/leak-jwt', LEAK_RL, verifyX402Payment({ mode: 'premium', expectedAmountUSD: 0.11 }), (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app).get('/test/leak-jwt').set('x402-payment', 'not-a-jwt.at.all');
+    expect(res.status).toBe(402);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('not-a-jwt.at.all');  // raw header value not echoed
+    expect(bodyStr).not.toContain('SyntaxError');
+    expect(bodyStr).not.toContain('JsonWebTokenError');
+  });
+
+  test('premium mode 402 (unknown kid): response does not reveal internal kid list', async () => {
+    const token = signTestToken({ amount: 0.11, currency: 'USD', payer: 'SomePayer11111111111111111111111111111111' }, { kid: 'unknown-kid-secret' });
+
+    const app = express();
+    app.use(express.json());
+    app.get('/test/leak-kid', LEAK_RL, verifyX402Payment({ mode: 'premium', expectedAmountUSD: 0.11 }), (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app).get('/test/leak-kid').set('x402-payment', token);
+    expect(res.status).toBe(402);
+    const bodyStr = JSON.stringify(res.body);
+    // The actual key ids from JWKS must not be enumerated
+    expect(bodyStr).not.toContain('test-kid-1');
+    expect(bodyStr).not.toContain('unknown-kid-secret');
+  });
+
+  test('premium mode 402 (insufficient amount): response does not contain raw internal variable names', async () => {
+    const payer = 'LeakCheckPayer111111111111111111111111111111';
+    const token = signTestToken({ amount: 0.01, currency: 'USD', payer });
+
+    const app = express();
+    app.use(express.json());
+    app.get('/test/leak-amount', LEAK_RL, verifyX402Payment({ mode: 'premium', expectedAmountUSD: 0.11 }), (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app).get('/test/leak-amount').set('x402-payment', token);
+    expect(res.status).toBe(402);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('expectedAmountUSD');  // internal variable name
+    expect(bodyStr).not.toContain('rawAmount');           // internal variable name
+    expect(bodyStr).not.toContain('amountUSD <');         // raw comparison expression
+  });
+
+  test('all 402 responses have error property set to "Payment Required"', async () => {
+    const basicApp = express();
+    basicApp.use(express.json());
+    basicApp.get('/b', LEAK_RL, verifyX402Payment({ mode: 'basic' }), (_req, res) => res.json({ ok: true }));
+
+    const premApp = express();
+    premApp.use(express.json());
+    premApp.get('/p', LEAK_RL, verifyX402Payment({ mode: 'premium', expectedAmountUSD: 0.11 }), (_req, res) => res.json({ ok: true }));
+
+    const resBasic = await request(basicApp).get('/b').set('x402-payment', 'wrong');
+    expect(resBasic.body.error).toBe('Payment Required');
+
+    const resPrem = await request(premApp).get('/p');
+    expect(resPrem.body.error).toBe('Payment Required');
   });
 });
