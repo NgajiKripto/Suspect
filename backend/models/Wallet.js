@@ -13,6 +13,46 @@ const Counter = mongoose.model('Counter', counterSchema);
 
 /**
  * ==========================
+ * SOLANA BASE58 VALIDATOR
+ * ==========================
+ * Validates a Solana-compatible Base58-encoded address (32–44 chars,
+ * excludes ambiguous characters 0, O, I, l).
+ * Mirrors the WALLET_ADDRESS_REGEX used in server.js.
+ */
+const SOLANA_BASE58_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+function validateSolanaBase58(addr) {
+  return typeof addr === 'string' && SOLANA_BASE58_REGEX.test(addr);
+}
+
+/**
+ * ==========================
+ * PREMIUM FORENSICS SUB-SCHEMA
+ * ==========================
+ * Defined separately so that select: false can be applied to the
+ * entire premiumForensics path, keeping it out of default query
+ * results unless explicitly requested with +premiumForensics.
+ */
+const premiumForensicsSchema = new mongoose.Schema({
+  addLiquidityValue:    { type: String, default: null, maxlength: 50 },
+  removeLiquidityValue: { type: String, default: null, maxlength: 50 },
+  walletFunding:        { type: String, default: null, maxlength: 200 },
+  tokensCreated: {
+    type: [String],
+    default: [],
+    validate: { validator: v => v.every(validateSolanaBase58), message: 'Invalid token address' }
+  },
+  forensicNotes:  { type: String, default: null, maxlength: 500 },
+  crossProjectLinks: {
+    type: [String],
+    default: [],
+    validate: { validator: v => v.every(validateSolanaBase58), message: 'Invalid wallet address' }
+  },
+  updatedAt: { type: Date, default: null }
+}, { _id: false });
+
+/**
+ * ==========================
  * WALLET SCHEMA
  * ==========================
  */
@@ -54,14 +94,11 @@ const walletSchema = new mongoose.Schema({
   },
 
   // 🔐 PREMIUM FORENSICS — x402 gated ($0.11 payment required)
+  // select: false ensures this subdocument is NEVER included in query
+  // results by default; use .select('+premiumForensics') to include it.
   premiumForensics: {
-    addLiquidityValue: { type: String, default: null },      // Value saat add liquidity, e.g. "45.2 SOL"
-    removeLiquidityValue: { type: String, default: null },   // Value saat remove liquidity, e.g. "0.3 SOL"
-    walletFunding: { type: String, default: null },          // Source of initial funds, e.g. "Tornado Cash"
-    tokensCreated: { type: [String], default: [] },          // List token yang pernah dibuat
-    forensicNotes: { type: String, default: null },          // Admin internal notes on pattern analysis
-    crossProjectLinks: { type: [String], default: [] },      // Related wallets showing repeat offender pattern
-    updatedAt: { type: Date, default: null }
+    type: premiumForensicsSchema,
+    select: false
   },
 
   reportCount: { type: Number, default: 1 },
@@ -98,6 +135,23 @@ walletSchema.methods.calculateRiskScore = function () {
 
 /**
  * ==========================
+ * toPublicJSON
+ * ==========================
+ * Returns a plain object safe for API responses.
+ * premiumForensics is only included when hasPremiumAccess === true
+ * (i.e. the caller has supplied a valid x402 payment and the query
+ * used .select('+premiumForensics') to hydrate the field).
+ */
+walletSchema.methods.toPublicJSON = function (hasPremiumAccess) {
+  const { premiumForensics: _pf, ...obj } = this.toObject({ versionKey: false });
+  if (hasPremiumAccess === true) {
+    obj.premiumForensics = this.premiumForensics || null;
+  }
+  return obj;
+};
+
+/**
+ * ==========================
  * PRE SAVE
  * ==========================
  */
@@ -117,3 +171,4 @@ walletSchema.pre('save', async function (next) {
 });
 
 module.exports = mongoose.model('Wallet', walletSchema);
+module.exports.validateSolanaBase58 = validateSolanaBase58;
