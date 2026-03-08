@@ -15,6 +15,7 @@ const { verifyX402Payment } = require('./middleware/verifyX402Payment');
 const { requireAdminAuth } = require('./middleware/requireAdminAuth');
 const { requireAccess } = require('./middleware/requireAccess');
 const { writeAuditLog, hashIp, AUDIT_LOG_PATH } = require('./auditLog');
+const { formatWalletResponse } = require('./utils/response');
 const {
   parsePremiumInput,
   validatePremiumFields,
@@ -865,7 +866,7 @@ app.get('/api/wallets', async (req, res) => {
   try {
     const wallets = await Wallet.find({ status: 'verified' })
       .select('-forensic -premiumForensics -__v');
-    res.json(wallets);
+    res.json(wallets.map(w => formatWalletResponse(w)));
   } catch (err) {
     console.error('GET /api/wallets error:', err.message);
     res.status(500).json({ message: 'Internal server error' });
@@ -897,7 +898,7 @@ app.get('/api/wallets/:address', premiumQueryGate, async (req, res) => {
 
     if (!wallet) return res.status(404).json({ message: 'Not found' });
 
-    res.json(wallet.toPublicJSON(hasPremiumAccess));
+    res.json(formatWalletResponse(wallet, { hasPremiumAccess }));
   } catch (err) {
     console.error('GET /api/wallets/:address error:', err.message);
     res.status(500).json({ message: 'Internal server error' });
@@ -1183,7 +1184,7 @@ app.patch('/api/admin/wallets/:address/premium', adminPremiumRateLimit, requireA
 
     return res.json({
       success: true,
-      premiumForensics: wallet.premiumForensics,
+      wallet: formatWalletResponse(wallet, { hasPremiumAccess: true }),
       auditLog: {
         updatedBy: 'admin',
         timestamp,
