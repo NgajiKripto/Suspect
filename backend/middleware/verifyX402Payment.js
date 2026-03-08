@@ -25,13 +25,36 @@
  *
  * On failure: responds 402 Payment Required.
  *
- * All payment attempts (success and failure) are logged to stderr as
- * newline-delimited JSON. Sensitive values (the raw JWT) are never logged.
+ * All payment attempts (success and failure) are logged to backend/logs/security.log
+ * as newline-delimited JSON with hashed IPs. Sensitive values (raw JWT, plain IP) are
+ * never logged.
  */
 
 const crypto = require('crypto');
+const fs     = require('fs');
 const https  = require('https');
+const path   = require('path');
 const jwt    = require('jsonwebtoken');
+const { hashIp } = require('../auditLog');
+
+// ── Security log (payment attempts) ──────────────────────────────────────────
+const SECURITY_LOG_DIR  = path.join(__dirname, '..', 'logs');
+const SECURITY_LOG_PATH = path.join(SECURITY_LOG_DIR, 'security.log');
+
+(function ensureSecurityLog() {
+  try {
+    if (!fs.existsSync(SECURITY_LOG_DIR)) {
+      fs.mkdirSync(SECURITY_LOG_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(SECURITY_LOG_PATH)) {
+      fs.writeFileSync(SECURITY_LOG_PATH, '', { mode: 0o600 });
+    } else {
+      try { fs.chmodSync(SECURITY_LOG_PATH, 0o600); } catch { /* ignore */ }
+    }
+  } catch (err) {
+    process.stderr.write(`[verifyX402Payment] security log setup failed: ${err.message}\n`);
+  }
+}());
 
 // ── External endpoints ────────────────────────────────────────────────────────
 const JWKS_URL      = 'https://www.x402gateway.io/.well-known/jwks.json';
@@ -110,11 +133,15 @@ async function getSolPriceUSD() {
 
 // ── Payment attempt logger ─────────────────────────────────────────────────────
 /**
- * Writes a payment attempt log entry to stderr as a JSON line.
- * The raw JWT token is never included in log entries.
+ * Writes a payment attempt log entry to security.log as a JSON line.
+ * The raw JWT token and plain IP are never included in log entries.
+ * The IP is hashed (sha256) for privacy-preserving logging.
  */
 function logPaymentAttempt(entry) {
-  process.stderr.write(JSON.stringify(entry) + '\n');
+  const line = JSON.stringify(entry) + '\n';
+  fs.appendFile(SECURITY_LOG_PATH, line, (err) => {
+    if (err) process.stderr.write(`[verifyX402Payment] log write failed: ${err.message}\n`);
+  });
 }
 
 // ── JWK → Node.js KeyObject ────────────────────────────────────────────────────
@@ -158,7 +185,7 @@ function verifyX402Payment(options = {}) {
     const paymentHeader = req.headers['x402-payment'];
     const logBase = {
       timestamp:        new Date().toISOString(),
-      ip:               req.ip,
+      ipHash:           hashIp(req.ip),
       path:             req.originalUrl,
       mode,
       hasPaymentHeader: Boolean(paymentHeader)

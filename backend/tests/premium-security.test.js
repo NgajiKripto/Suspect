@@ -789,7 +789,8 @@ describe('PS-5. Audit Logging', () => {
     const entries = await readNewLogEntries(baseline);
     expect(entries.length).toBeGreaterThan(0);
 
-    const entry = entries[entries.length - 1];
+    const entry = entries.find(e => e.action === 'premium_update');
+    expect(entry).toBeDefined();
     expect(entry).toHaveProperty('timestamp');
     expect(entry).toHaveProperty('action', 'premium_update');
     expect(entry).toHaveProperty('walletAddress', VALID_ADDRESS);
@@ -834,14 +835,15 @@ describe('PS-5. Audit Logging', () => {
     const entries = await readNewLogEntries(baseline);
     expect(entries.length).toBeGreaterThan(0);
 
-    const entry   = entries[entries.length - 1];
+    // Filter to complete admin-app entries (ipHash present) to avoid picking up
+    // partial entries written by concurrent test files.
+    const entry   = entries.find(e => e.action === 'premium_update' && e.ipHash !== undefined);
+    expect(entry).toBeDefined();
     const rawLine = JSON.stringify(entry);
 
     // ipHash must be present and match the sha256-prefixed format
     expect(entry).toHaveProperty('ipHash');
-    if (entry.ipHash !== undefined) {
-      expect(entry.ipHash).toMatch(/^sha256-[a-f0-9]{64}$/);
-    }
+    expect(entry.ipHash).toMatch(/^sha256-[a-f0-9]{64}$/);
     // Raw loopback IPs must not appear in the log
     expect(rawLine).not.toContain('"ip"');
     expect(rawLine).not.toMatch(/"127\.0\.0\.1"/);
