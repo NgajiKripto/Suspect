@@ -297,6 +297,30 @@ function buildBulkDiffPreview(caseNumber, walletAddress, currentData, newData) {
   return lines.join('\n');
 }
 
+/**
+ * Prefix constants for Telegram inline-keyboard callback_data.
+ *
+ * All bot keyboards must use these prefixes so that routeCallback (server.js)
+ * can dispatch to the correct handler without ambiguity.
+ *
+ *   VERIFY          → 'verify:'          e.g. verify:<walletId>
+ *   PREMIUM_ADD     → 'premium:add:'     e.g. premium:add:<walletId>
+ *   PREMIUM_EDIT    → 'premium:edit:'    e.g. premium:edit:<field>:<walletId>
+ *   PREMIUM_CONFIRM → 'premium:confirm:' e.g. premium:confirm:add:<key>
+ *                                             premium:confirm:edit:<key>
+ *                                             premium:confirm:bulk:<key>
+ *   CANCEL          → 'cancel'           e.g. cancel:add:<key>
+ *                                             cancel:edit:<key>
+ *                                             cancel:bulk:<key>
+ */
+const CALLBACK = {
+  VERIFY:          'verify:',
+  PREMIUM_ADD:     'premium:add:',
+  PREMIUM_EDIT:    'premium:edit:',
+  PREMIUM_CONFIRM: 'premium:confirm:',
+  CANCEL:          'cancel'
+};
+
 module.exports = {
   parsePremiumInput,
   validatePremiumFields,
@@ -307,5 +331,6 @@ module.exports = {
   SENSITIVE_FIELDS,
   buildEditCurrentValues,
   buildDiffPreview,
-  buildBulkDiffPreview
+  buildBulkDiffPreview,
+  CALLBACK
 };

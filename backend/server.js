@@ -26,7 +26,8 @@ const {
   SENSITIVE_FIELDS,
   buildEditCurrentValues,
   buildDiffPreview,
-  buildBulkDiffPreview
+  buildBulkDiffPreview,
+  CALLBACK
 } = require('./botUtils');
 
 const app = express();
@@ -134,12 +135,12 @@ const requestForensicInput = async (wallet) => {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: '🔍 Review',           callback_data: `review_${wallet._id}` },
-            { text: '✅ Verify',           callback_data: `verify_${wallet._id}` }
+            { text: '🔍 Review',           callback_data: `review:${wallet._id}` },
+            { text: '✅ Verify',           callback_data: `verify:${wallet._id}` }
           ],
           [
-            { text: '❌ Reject',           callback_data: `reject_${wallet._id}` },
-            { text: '📝 Add Premium Data', callback_data: `addpremium_${wallet._id}` }
+            { text: '❌ Reject',           callback_data: `reject:${wallet._id}` },
+            { text: '📝 Add Premium Data', callback_data: `premium:add:${wallet._id}` }
           ]
         ]
       }
@@ -185,7 +186,7 @@ bot.on('message', async (msg) => {
     {
       reply_markup: {
         inline_keyboard: [[
-          { text: '✅ Verify', callback_data: `verify_${wallet._id}` }
+          { text: '✅ Verify', callback_data: `verify:${wallet._id}` }
         ]]
       }
     }
@@ -278,16 +279,16 @@ bot.onText(/\/edit_premium(?:\s+(.+))?/, async (msg, match) => {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: '✏️ ADD_LIQ', callback_data: `editfield_addLiquidityValue_${wallet._id}` },
-          { text: '✏️ REM_LIQ', callback_data: `editfield_removeLiquidityValue_${wallet._id}` }
+          { text: '✏️ ADD_LIQ', callback_data: `premium:edit:addLiquidityValue:${wallet._id}` },
+          { text: '✏️ REM_LIQ', callback_data: `premium:edit:removeLiquidityValue:${wallet._id}` }
         ],
         [
-          { text: '✏️ FUNDING', callback_data: `editfield_walletFunding_${wallet._id}` },
-          { text: '✏️ TOKENS',  callback_data: `editfield_tokensCreated_${wallet._id}` }
+          { text: '✏️ FUNDING', callback_data: `premium:edit:walletFunding:${wallet._id}` },
+          { text: '✏️ TOKENS',  callback_data: `premium:edit:tokensCreated:${wallet._id}` }
         ],
         [
-          { text: '✏️ NOTES',  callback_data: `editfield_forensicNotes_${wallet._id}` },
-          { text: '✏️ LINKS',  callback_data: `editfield_crossProjectLinks_${wallet._id}` }
+          { text: '✏️ NOTES',  callback_data: `premium:edit:forensicNotes:${wallet._id}` },
+          { text: '✏️ LINKS',  callback_data: `premium:edit:crossProjectLinks:${wallet._id}` }
         ]
       ]
     }
@@ -338,8 +339,8 @@ bot.on('message', async (msg) => {
   await bot.sendMessage(chatId, preview, {
     reply_markup: {
       inline_keyboard: [[
-        { text: '✅ Confirm', callback_data: `confirmpremium_${confirmKey}` },
-        { text: '❌ Cancel',  callback_data: `cancelpremium_${confirmKey}` }
+        { text: '✅ Confirm', callback_data: `premium:confirm:add:${confirmKey}` },
+        { text: '❌ Cancel',  callback_data: `cancel:add:${confirmKey}` }
       ]]
     }
   });
@@ -409,8 +410,8 @@ bot.on('message', async (msg) => {
   await bot.sendMessage(chatId, preview, {
     reply_markup: {
       inline_keyboard: [[
-        { text: '✅ Confirm', callback_data: `confirmedit_${confirmKey}` },
-        { text: '❌ Cancel',  callback_data: `canceledit_${confirmKey}` }
+        { text: '✅ Confirm', callback_data: `premium:confirm:edit:${confirmKey}` },
+        { text: '❌ Cancel',  callback_data: `cancel:edit:${confirmKey}` }
       ]]
     }
   });
@@ -500,95 +501,219 @@ bot.on('message', async (msg) => {
   await bot.sendMessage(chatId, preview, {
     reply_markup: {
       inline_keyboard: [[
-        { text: '✅ Confirm All', callback_data: `confirmbulkedit_${confirmKey}` },
-        { text: '❌ Cancel',      callback_data: `cancelbulkedit_${confirmKey}` }
+        { text: '✅ Confirm All', callback_data: `premium:confirm:bulk:${confirmKey}` },
+        { text: '❌ Cancel',      callback_data: `cancel:bulk:${confirmKey}` }
       ]]
     }
   });
 });
-bot.on('callback_query', async (query) => {
-  // Verify the callback originates from an authorized admin chat and user
-  if (!telegramAdminAuth(query)) {
-    await bot.answerCallbackQuery(query.id, { text: '⛔ Unauthorized.' });
-    return;
+
+// ── Callback handlers ─────────────────────────────────────────────────────────
+// Each handler receives (query, parts) where parts = query.data.split(':').
+// All handlers must answer the callback query and return true on success.
+
+/**
+ * handle: review:<walletId>
+ * Show wallet details to the admin.
+ */
+async function handleReview(query, parts) {
+  const walletId = parts.slice(1).join(':');
+  const wallet = await Wallet.findById(walletId);
+  if (!wallet) {
+    return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+  }
+  await bot.answerCallbackQuery(query.id, { text: 'Loading details…' });
+  await bot.sendMessage(
+    chatId,
+    `🔍 Case #${wallet.caseNumber}\n\n` +
+    `📍 Address: ${wallet.walletAddress}\n` +
+    `📊 Status: ${wallet.status}\n` +
+    `⚠️ Risk Score: ${wallet.riskScore ?? 'N/A'}\n` +
+    `📝 Description: ${wallet.evidence?.description || '(none)'}\n` +
+    `🔗 Tx Hash: ${wallet.evidence?.txHash || '(none)'}\n` +
+    `🗂 Reports: ${wallet.reportCount ?? 1}`
+  );
+  return true;
+}
+
+/**
+ * handle: reject:<walletId>
+ * Mark the case as rejected.
+ */
+async function handleReject(query, parts) {
+  const walletId = parts.slice(1).join(':');
+  const wallet = await Wallet.findById(walletId);
+  if (!wallet) {
+    return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+  }
+  wallet.status = 'rejected';
+  await wallet.save();
+  await bot.answerCallbackQuery(query.id, { text: '❌ Case rejected.' });
+  await bot.sendMessage(chatId, `❌ Case #${wallet.caseNumber} has been rejected.`);
+  return true;
+}
+
+/**
+ * handle: verify:<walletId>   (CALLBACK.VERIFY)
+ * Verify the case and offer the Set Premium Forensics action.
+ */
+async function handleVerify(query, parts) {
+  const walletId = parts.slice(1).join(':');
+  const wallet = await Wallet.findById(walletId);
+  if (!wallet) {
+    return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
   }
 
-  // Use first-underscore split so compound callback data (e.g. editfield_fieldName_walletId)
-  // is correctly parsed regardless of underscores in later segments.
-  const firstUnderscore = query.data.indexOf('_');
-  const action = firstUnderscore >= 0 ? query.data.slice(0, firstUnderscore) : query.data;
-  const id     = firstUnderscore >= 0 ? query.data.slice(firstUnderscore + 1) : '';
+  if (!wallet.forensic?.liquidityBefore) {
+    return bot.answerCallbackQuery(query.id, { text: 'Isi forensic dulu!' });
+  }
 
-  if (action === 'review') {
-    const wallet = await Wallet.findById(id);
-    if (!wallet) {
-      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+  wallet.status = 'verified';
+  await wallet.save();
+
+  await bot.sendMessage(chatId,
+    `✅ Case #${wallet.caseNumber} Verified\nRisk Score: ${wallet.riskScore}`,
+    {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '🔐 Set Premium Forensics', callback_data: `setpremium:${wallet._id}` }
+        ]]
+      }
     }
-    await bot.answerCallbackQuery(query.id, { text: 'Loading details…' });
-    await bot.sendMessage(
-      chatId,
-      `🔍 Case #${wallet.caseNumber}\n\n` +
-      `📍 Address: ${wallet.walletAddress}\n` +
-      `📊 Status: ${wallet.status}\n` +
-      `⚠️ Risk Score: ${wallet.riskScore ?? 'N/A'}\n` +
-      `📝 Description: ${wallet.evidence?.description || '(none)'}\n` +
-      `🔗 Tx Hash: ${wallet.evidence?.txHash || '(none)'}\n` +
-      `🗂 Reports: ${wallet.reportCount ?? 1}`
-    );
-    return;
+  );
+  return true;
+}
+
+/**
+ * handle: setpremium:<walletId>
+ * Prompt admin to send premium forensics in the legacy format.
+ */
+async function handleSetPremium(query, parts) {
+  const walletId = parts.slice(1).join(':');
+  const wallet = await Wallet.findById(walletId);
+  if (!wallet) return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+
+  await bot.answerCallbackQuery(query.id, { text: 'Kirim data premium forensic.' });
+  await bot.sendMessage(chatId,
+    `📋 Case #${wallet.caseNumber} — Premium Forensics\n\nKirim dengan format:\n\nAddLiquidityValue:\nRemoveLiquidityValue:\nWalletFunding:\nTokensCreated:\nForensicNotes:\nCrossProjectLinks:\nWalletId: ${wallet._id}`
+  );
+  return true;
+}
+
+/**
+ * handle: premium:add:<walletId>   (CALLBACK.PREMIUM_ADD)
+ * Start the structured ADD_LIQ/REM_LIQ input flow for a wallet.
+ *
+ * Example callback_data: `premium:add:${wallet._id}`
+ * After this handler runs, the admin's next message (containing ADD_LIQ: etc.)
+ * is picked up by the pendingPremiumEntry message handler.
+ */
+async function handlePremiumAdd(query, parts) {
+  // parts: ['premium', 'add', '<walletId>']
+  const walletId = parts.slice(2).join(':');
+  const wallet = await Wallet.findById(walletId);
+  if (!wallet) {
+    return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+  }
+  // Store pending entry so the next matching message is attributed to this wallet
+  const timeoutId = setTimeout(
+    () => pendingPremiumEntry.delete(String(chatId)),
+    10 * 60 * 1000
+  );
+  pendingPremiumEntry.set(String(chatId), {
+    walletId:      wallet._id,
+    walletAddress: wallet.walletAddress,
+    caseNumber:    wallet.caseNumber,
+    timeoutId
+  });
+  await bot.answerCallbackQuery(query.id, { text: 'Send premium data now.' });
+  await bot.sendMessage(
+    chatId,
+    `📝 Enter premium forensic data for Case #${wallet.caseNumber} in the format:\n\n` +
+    `ADD_LIQ: 45.2 SOL\n` +
+    `REM_LIQ: 0.3 SOL\n` +
+    `FUNDING: CEX withdrawal (Binance)\n` +
+    `TOKENS: Token1Addr,Token2Addr\n` +
+    `NOTES: Repeated rugpull pattern across 3 projects\n` +
+    `LINKS: RelatedWallet1,RelatedWallet2\n\n` +
+    `Use /premium_help for field rules.`
+  );
+  return true;
+}
+
+/**
+ * handle: premium:edit:<field>:<walletId>   (CALLBACK.PREMIUM_EDIT)
+ * Start a single-field edit prompt for a specific premium forensics field.
+ *
+ * Example callback_data: `premium:edit:addLiquidityValue:${wallet._id}`
+ */
+async function handlePremiumEdit(query, parts) {
+  // parts: ['premium', 'edit', '<fieldName>', '<walletId>']
+  const fieldName = parts[2];
+  const walletId  = parts.slice(3).join(':');
+
+  const wallet = await Wallet.findById(walletId).select('+premiumForensics');
+  if (!wallet) {
+    return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+  }
+  if (wallet.status !== 'verified') {
+    return bot.answerCallbackQuery(query.id, { text: '❌ Wallet is not verified.' });
   }
 
-  if (action === 'reject') {
-    const wallet = await Wallet.findById(id);
-    if (!wallet) {
-      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
-    }
-    wallet.status = 'rejected';
-    await wallet.save();
-    await bot.answerCallbackQuery(query.id, { text: '❌ Case rejected.' });
-    await bot.sendMessage(chatId, `❌ Case #${wallet.caseNumber} has been rejected.`);
-    return;
-  }
+  const currentData = wallet.premiumForensics ? wallet.premiumForensics.toObject() : {};
+  const oldValue    = currentData[fieldName];
+  const fieldLabel  = CAMEL_TO_KEY[fieldName] || fieldName;
 
-  if (action === 'addpremium') {
-    const wallet = await Wallet.findById(id);
-    if (!wallet) {
-      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
-    }
-    // Store pending entry so the next matching message is attributed to this wallet
-    const timeoutId = setTimeout(
-      () => pendingPremiumEntry.delete(String(chatId)),
-      10 * 60 * 1000
-    );
-    pendingPremiumEntry.set(String(chatId), {
-      walletId:      wallet._id,
-      walletAddress: wallet.walletAddress,
-      caseNumber:    wallet.caseNumber,
-      timeoutId
-    });
-    await bot.answerCallbackQuery(query.id, { text: 'Send premium data now.' });
-    await bot.sendMessage(
-      chatId,
-      `📝 Enter premium forensic data for Case #${wallet.caseNumber} in the format:\n\n` +
-      `ADD_LIQ: 45.2 SOL\n` +
-      `REM_LIQ: 0.3 SOL\n` +
-      `FUNDING: CEX withdrawal (Binance)\n` +
-      `TOKENS: Token1Addr,Token2Addr\n` +
-      `NOTES: Repeated rugpull pattern across 3 projects\n` +
-      `LINKS: RelatedWallet1,RelatedWallet2\n\n` +
-      `Use /premium_help for field rules.`
-    );
-    return;
-  }
+  const fmt = (val) => {
+    if (val === undefined || val === null) return '(not set)';
+    return Array.isArray(val) ? val.join(', ') : String(val);
+  };
 
-  if (action === 'confirmpremium') {
-    const pendingData = pendingPremiumData.get(id);
+  const timeoutId = setTimeout(
+    () => pendingFieldEdit.delete(String(chatId)),
+    10 * 60 * 1000
+  );
+  pendingFieldEdit.set(String(chatId), {
+    walletId:      wallet._id,
+    walletAddress: wallet.walletAddress,
+    caseNumber:    wallet.caseNumber,
+    fieldName,
+    oldValue,
+    timeoutId
+  });
+
+  await bot.answerCallbackQuery(query.id, { text: `Editing ${fieldLabel}…` });
+  await bot.sendMessage(
+    chatId,
+    `✏️ Enter new value for ${fieldLabel} (Case #${wallet.caseNumber}):\n\nCurrent: ${fmt(oldValue)}\n\nFor TOKENS and LINKS, send comma-separated Base58 addresses.\nSend /canceledit to cancel.`
+  );
+  return true;
+}
+
+/**
+ * handle: premium:confirm:<subtype>:<key>   (CALLBACK.PREMIUM_CONFIRM)
+ * Confirm a pending premium data change.
+ *
+ * Subtypes:
+ *   add  — confirm a full ADD_LIQ/... entry  (was confirmpremium)
+ *   edit — confirm a single-field diff        (was confirmedit)
+ *   bulk — confirm a NEW_VALUES bulk update   (was confirmbulkedit)
+ *
+ * Example callback_data: `premium:confirm:add:${confirmKey}`
+ */
+async function handlePremiumConfirm(query, parts) {
+  // parts: ['premium', 'confirm', '<subtype>', '<key>']
+  const subtype    = parts[2];
+  const confirmKey = parts.slice(3).join(':');
+
+  if (subtype === 'add') {
+    const pendingData = pendingPremiumData.get(confirmKey);
     if (!pendingData) {
       return bot.answerCallbackQuery(query.id, {
         text: '❌ Confirmation expired. Please click [📝 Add Premium Data] again.'
       });
     }
-    pendingPremiumData.delete(id);
+    pendingPremiumData.delete(confirmKey);
 
     const wallet = await Wallet.findById(pendingData.walletId).select('+premiumForensics');
     if (!wallet) {
@@ -628,109 +753,22 @@ bot.on('callback_query', async (query) => {
       chatId,
       `✅ Premium forensics saved for Case #${wallet.caseNumber}.\nFields updated: ${fieldsChanged.join(', ') || 'none'}`
     );
-    return;
+    return true;
   }
 
-  if (action === 'cancelpremium') {
-    pendingPremiumData.delete(id);
-    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' });
-    await bot.sendMessage(chatId, '❌ Premium data entry cancelled.');
-    return;
-  }
-
-  if (action === 'verify') {
-    const wallet = await Wallet.findById(id);
-
-    if (!wallet.forensic?.liquidityBefore) {
-      return bot.answerCallbackQuery(query.id, {
-        text: 'Isi forensic dulu!'
-      });
-    }
-
-    wallet.status = 'verified';
-    await wallet.save();
-
-    await bot.sendMessage(chatId,
-      `✅ Case #${wallet.caseNumber} Verified\nRisk Score: ${wallet.riskScore}`,
-      {
-        reply_markup: {
-          inline_keyboard: [[
-            { text: '🔐 Set Premium Forensics', callback_data: `setpremium_${wallet._id}` }
-          ]]
-        }
-      }
-    );
-  }
-
-  if (action === 'setpremium') {
-    const wallet = await Wallet.findById(id);
-    if (!wallet) return;
-
-    await bot.answerCallbackQuery(query.id, { text: 'Kirim data premium forensic.' });
-    await bot.sendMessage(chatId,
-      `📋 Case #${wallet.caseNumber} — Premium Forensics\n\nKirim dengan format:\n\nAddLiquidityValue:\nRemoveLiquidityValue:\nWalletFunding:\nTokensCreated:\nForensicNotes:\nCrossProjectLinks:\nWalletId: ${wallet._id}`
-    );
-  }
-
-  // ── editfield: admin clicked ✏️ next to a specific field ─────────────────
-  if (action === 'editfield') {
-    // id = '<fieldName>_<walletId>'  (neither camelCase nor MongoDB ObjectId contain underscores)
-    const sepIdx    = id.indexOf('_');
-    const fieldName = id.slice(0, sepIdx);
-    const walletId  = id.slice(sepIdx + 1);
-
-    const wallet = await Wallet.findById(walletId).select('+premiumForensics');
-    if (!wallet) {
-      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
-    }
-    if (wallet.status !== 'verified') {
-      return bot.answerCallbackQuery(query.id, { text: '❌ Wallet is not verified.' });
-    }
-
-    const currentData = wallet.premiumForensics ? wallet.premiumForensics.toObject() : {};
-    const oldValue    = currentData[fieldName];
-    const fieldLabel  = CAMEL_TO_KEY[fieldName] || fieldName;
-
-    const fmt = (val) => {
-      if (val === undefined || val === null) return '(not set)';
-      return Array.isArray(val) ? val.join(', ') : String(val);
-    };
-
-    const timeoutId = setTimeout(
-      () => pendingFieldEdit.delete(String(chatId)),
-      10 * 60 * 1000
-    );
-    pendingFieldEdit.set(String(chatId), {
-      walletId:      wallet._id,
-      walletAddress: wallet.walletAddress,
-      caseNumber:    wallet.caseNumber,
-      fieldName,
-      oldValue,
-      timeoutId
-    });
-
-    await bot.answerCallbackQuery(query.id, { text: `Editing ${fieldLabel}…` });
-    await bot.sendMessage(
-      chatId,
-      `✏️ Enter new value for ${fieldLabel} (Case #${wallet.caseNumber}):\n\nCurrent: ${fmt(oldValue)}\n\nFor TOKENS and LINKS, send comma-separated Base58 addresses.\nSend /canceledit to cancel.`
-    );
-    return;
-  }
-
-  // ── confirmedit: admin confirmed a single-field diff ──────────────────────
-  if (action === 'confirmedit') {
-    const confirmData = pendingEditConfirm.get(id);
+  if (subtype === 'edit') {
+    const confirmData = pendingEditConfirm.get(confirmKey);
     if (!confirmData) {
       return bot.answerCallbackQuery(query.id, {
         text: '❌ Confirmation expired. Use /edit_premium to start again.'
       });
     }
-    pendingEditConfirm.delete(id);
+    pendingEditConfirm.delete(confirmKey);
 
     if (!checkAdminEditRateLimit(String(chatId))) {
       await bot.answerCallbackQuery(query.id, { text: '🚫 Rate limit reached.' });
       await bot.sendMessage(chatId, `🚫 Rate limit reached: max ${EDIT_RATE_LIMIT} edits per hour per admin. Please wait before making more changes.`);
-      return;
+      return true;
     }
 
     const wallet = await Wallet.findById(confirmData.walletId).select('+premiumForensics');
@@ -771,31 +809,22 @@ bot.on('callback_query', async (query) => {
       chatId,
       `✅ ${CAMEL_TO_KEY[confirmData.fieldName] || confirmData.fieldName} updated for Case #${wallet.caseNumber}.`
     );
-    return;
+    return true;
   }
 
-  // ── canceledit: admin cancelled a single-field diff ───────────────────────
-  if (action === 'canceledit') {
-    pendingEditConfirm.delete(id);
-    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' });
-    await bot.sendMessage(chatId, '❌ Field edit cancelled.');
-    return;
-  }
-
-  // ── confirmbulkedit: admin confirmed a bulk (NEW_VALUES) update ───────────
-  if (action === 'confirmbulkedit') {
-    const bulkData = pendingBulkEdit.get(id);
+  if (subtype === 'bulk') {
+    const bulkData = pendingBulkEdit.get(confirmKey);
     if (!bulkData) {
       return bot.answerCallbackQuery(query.id, {
         text: '❌ Confirmation expired. Use /edit_premium and send NEW_VALUES: ... again.'
       });
     }
-    pendingBulkEdit.delete(id);
+    pendingBulkEdit.delete(confirmKey);
 
     if (!checkAdminEditRateLimit(String(chatId))) {
       await bot.answerCallbackQuery(query.id, { text: '🚫 Rate limit reached.' });
       await bot.sendMessage(chatId, `🚫 Rate limit reached: max ${EDIT_RATE_LIMIT} edits per hour per admin.`);
-      return;
+      return true;
     }
 
     const wallet = await Wallet.findById(bulkData.walletId).select('+premiumForensics');
@@ -843,17 +872,100 @@ bot.on('callback_query', async (query) => {
       chatId,
       `✅ Bulk premium update saved for Case #${wallet.caseNumber}.\nFields updated: ${fieldsChanged.join(', ') || 'none'}`
     );
+    return true;
+  }
+
+  // Unknown subtype
+  return false;
+}
+
+/**
+ * handle: cancel:<subtype>:<key>   (CALLBACK.CANCEL)
+ * Cancel a pending premium data change.
+ *
+ * Subtypes:
+ *   add  — cancel a full ADD_LIQ/... entry  (was cancelpremium)
+ *   edit — cancel a single-field diff        (was canceledit)
+ *   bulk — cancel a NEW_VALUES bulk update   (was cancelbulkedit)
+ *
+ * Example callback_data: `cancel:add:${confirmKey}`
+ */
+async function handleCancel(query, parts) {
+  // parts: ['cancel', '<subtype>', '<key>']
+  const subtype    = parts[1];
+  const confirmKey = parts.slice(2).join(':');
+
+  if (subtype === 'add') {
+    pendingPremiumData.delete(confirmKey);
+    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' });
+    await bot.sendMessage(chatId, '❌ Premium data entry cancelled.');
+    return true;
+  }
+
+  if (subtype === 'edit') {
+    pendingEditConfirm.delete(confirmKey);
+    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' });
+    await bot.sendMessage(chatId, '❌ Field edit cancelled.');
+    return true;
+  }
+
+  if (subtype === 'bulk') {
+    pendingBulkEdit.delete(confirmKey);
+    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' });
+    await bot.sendMessage(chatId, '❌ Bulk edit cancelled.');
+    return true;
+  }
+
+  // Unknown subtype
+  return false;
+}
+
+/**
+ * Route a Telegram callback_query to the correct handler based on its
+ * callback_data prefix (using the CALLBACK constant prefixes).
+ *
+ * Routing table:
+ *   CALLBACK.VERIFY          ('verify:')          → handleVerify
+ *   CALLBACK.PREMIUM_ADD     ('premium:add:')      → handlePremiumAdd
+ *   CALLBACK.PREMIUM_EDIT    ('premium:edit:')     → handlePremiumEdit
+ *   CALLBACK.PREMIUM_CONFIRM ('premium:confirm:')  → handlePremiumConfirm
+ *   CALLBACK.CANCEL          ('cancel')            → handleCancel
+ *   'review:'                                      → handleReview
+ *   'reject:'                                      → handleReject
+ *   'setpremium:'                                  → handleSetPremium
+ *
+ * @param {object} query - Telegram callback_query object
+ * @returns {Promise<boolean>} true if the query was handled; false if the
+ *   prefix was unrecognised (caller should send an "Unknown action" response)
+ */
+async function routeCallback(query) {
+  const data  = query.data || '';
+  const parts = data.split(':');
+
+  if (data.startsWith(CALLBACK.PREMIUM_CONFIRM)) return handlePremiumConfirm(query, parts);
+  if (data.startsWith(CALLBACK.PREMIUM_ADD))     return handlePremiumAdd(query, parts);
+  if (data.startsWith(CALLBACK.PREMIUM_EDIT))    return handlePremiumEdit(query, parts);
+  if (data.startsWith(CALLBACK.VERIFY))          return handleVerify(query, parts);
+  if (data.startsWith(CALLBACK.CANCEL))          return handleCancel(query, parts);
+  if (data.startsWith('review:'))                return handleReview(query, parts);
+  if (data.startsWith('reject:'))                return handleReject(query, parts);
+  if (data.startsWith('setpremium:'))            return handleSetPremium(query, parts);
+
+  return false;
+}
+
+bot.on('callback_query', async (query) => {
+  // Verify the callback originates from an authorized admin chat and user
+  if (!telegramAdminAuth(query)) {
+    await bot.answerCallbackQuery(query.id, { text: '⛔ Unauthorized.' });
     return;
   }
 
-  // ── cancelbulkedit: admin cancelled a bulk (NEW_VALUES) update ───────────
-  if (action === 'cancelbulkedit') {
-    pendingBulkEdit.delete(id);
-    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' });
-    await bot.sendMessage(chatId, '❌ Bulk edit cancelled.');
-    return;
+  if (!await routeCallback(query)) {
+    await bot.answerCallbackQuery(query.id, { text: 'Unknown action' });
   }
 });
+
 
 /**
  * ==========================
