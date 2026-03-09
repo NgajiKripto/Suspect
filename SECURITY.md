@@ -38,13 +38,16 @@ When adding any new input field, verify ALL of the following:
 | `GET /api/wallets` | Public (anyone) | No auth required — returns only `verified` wallets, forensic data excluded |
 | `GET /api/wallets/:address` | Public (anyone) | No auth required — returns only `verified` wallets, forensic data excluded |
 | `POST /api/wallets` | Public (anyone) | No auth — rate-limited to 5 requests / 15 min per IP |
-| `GET /api/wallets/:address/premium` | Paying users | `x402-payment` header must equal `X402_PAYMENT_SECRET` (timing-safe) |
-| Telegram bot commands | Admin only | Bot rejects all messages/callbacks not from `TELEGRAM_CHAT_ID` |
+| `GET /api/wallets/:address?include=premium` | Paying users | `x402-payment` JWT verified via `x402gateway.io` JWKS + CoinGecko oracle; minimum $0.11 USD |
+| `GET /api/wallets/:address/premium` | Paying users | Same JWT + JWKS + oracle verification as above |
+| `PATCH /api/admin/wallets/:address/premium` | Admins only | Telegram admin token (`x-telegram-admin-token`) **or** JWT payer in `ADMIN_WALLET_ADDRESSES`; rate-limited to 20 req/hour |
+| `GET /api/admin/audit` | Admins only | Same dual-auth as PATCH — returns last 50 audit entries for a wallet |
+| Telegram bot commands | Admin only | Bot validates both `chat.id` vs `TELEGRAM_ADMIN_CHAT_ID` **and** `from.id` vs `TELEGRAM_ADMIN_USER_IDS` whitelist |
 
 ### Checklist for New Endpoints
 
 - [ ] Define who should be able to call this endpoint (public / paying user / admin)
-- [ ] Add auth middleware (payment header check or future JWT) before handler
+- [ ] Apply `requireAccess('public' | 'premium' | 'admin')` middleware before the route handler
 - [ ] Ensure sensitive data (forensic fields, `__v`, internal IDs) is excluded from public responses via `.select()`
 - [ ] Confirm the endpoint is covered by the global `rateLimit` middleware
 - [ ] Apply a stricter per-route rate limit if the endpoint is write-heavy or triggers side-effects (e.g., Telegram notifications, emails)
@@ -61,7 +64,8 @@ When adding any new input field, verify ALL of the following:
 | `evidence.description` | User-generated content | ✅ | ✅ |
 | `projectName` | User-generated content | ✅ | ✅ |
 | `riskScore` | Derived/computed | ✅ | ✅ |
-| `forensic.*` | Sensitive analysis data (premium) | ✅ | ❌ (premium endpoint only) |
+| `forensic.*` | Sensitive analysis data (internal) | ✅ | ❌ |
+| `premiumForensics.*` | Premium forensic data (6 fields) | ✅ (`select: false`) | ❌ (valid x402 payment required) |
 | `reporterContact` | **PII** (Telegram handle / email) | ❌ intentionally not stored | ❌ |
 | `X402_PAYMENT_SECRET` | Secret credential | Env var only | ❌ |
 | `TELEGRAM_BOT_TOKEN` | Secret credential | Env var only | ❌ |
@@ -70,7 +74,7 @@ When adding any new input field, verify ALL of the following:
 
 - **PII must never be persisted.** The `reporterContact` field is collected in the UI for UX purposes but is explicitly excluded from the backend handler and must never be added to the schema.
 - **Secrets must live in environment variables** — never in source code or the database.
-- **Premium data** (`forensic.*`) must never appear in public API responses. Always use `.select('-forensic -__v')` when building public queries.
+- **Premium data** (`premiumForensics.*`) must never appear in public API responses. The field is declared with `select: false` in Mongoose; only code paths that have verified a valid x402 payment use `.select('+premiumForensics')`.
 
 ---
 
@@ -82,11 +86,13 @@ When adding any new input field, verify ALL of the following:
 | Duplicate report (report count incremented) | ✅ | INFO | Log `caseNumber`, new `reportCount` |
 | Forensic data saved via Telegram | ✅ | INFO | Log `caseNumber` only |
 | Wallet verified via Telegram | ✅ | INFO | Log `caseNumber`, `riskScore` |
-| Payment token mismatch on premium endpoint | ✅ | WARN | Log IP address, do **not** log the token value |
+| Payment verification (success or failure) | ✅ | INFO/WARN | Written to `logs/security.log` as JSON-line with hashed IP — raw JWT and plain IP never logged |
 | Rate limit exceeded | ✅ | WARN | Handled automatically by `express-rate-limit` headers |
 | MongoDB connection error | ✅ | ERROR | Logged + `process.exit(1)` — ✅ already implemented |
 | Unhandled route error | ✅ | ERROR | Log sanitized error message, never stack trace to client |
 | Bot message from unauthorized chat | ✅ | WARN | Log chat ID |
+| Admin premium field update | ✅ | AUDIT | Written to `logs/admin_audit.log` (append-only, 0600 perms) with before/after diff and hashed IP |
+| Unauthorized admin attempt | ✅ | AUDIT | Written to `logs/admin_audit.log` with `event: "unauthorized_admin_attempt"` |
 
 ### Rules
 
@@ -244,11 +250,21 @@ When adding any new external `<link>` or `<script>` tag:
 
 Before deploying any new feature, ensure:
 
+**Core**
 - [ ] `MONGODB_URI` — set, not hardcoded
 - [ ] `TELEGRAM_BOT_TOKEN` — set, not hardcoded
-- [ ] `TELEGRAM_CHAT_ID` — set, not hardcoded
-- [ ] `X402_PAYMENT_SECRET` — set, not hardcoded; startup warning printed if absent
+- [ ] `TELEGRAM_CHAT_ID` — primary admin chat ID (legacy fallback for `TELEGRAM_ADMIN_CHAT_ID`)
 - [ ] `ALLOWED_ORIGIN` — set to production domain in production builds
+
+**x402 Payment**
+- [ ] `X402_PAYMENT_SECRET` — used by `mode: 'basic'` middleware; set, not hardcoded; startup warning printed if absent
+
+**Premium Admin Auth**
+- [ ] `ADMIN_WALLET_ADDRESSES` — comma-separated list of Solana wallet addresses allowed to call admin endpoints via JWT payment header
+- [ ] `ADMIN_SECRET` — fallback admin secret for non-JWT admin token path
+- [ ] `TELEGRAM_ADMIN_CHAT_ID` — authorised admin Telegram chat ID (overrides `TELEGRAM_CHAT_ID` when set)
+- [ ] `TELEGRAM_ADMIN_USER_IDS` — comma-separated list of authorised Telegram user IDs (empty = any user in the admin chat)
+- [ ] `TELEGRAM_ADMIN_TOKEN` — static token accepted in the `x-telegram-admin-token` header for HTTP admin routes
 
 ---
 
@@ -344,11 +360,11 @@ Use this table before every production release to verify that no security contro
 
 ### Access Control Checklist
 
-- [ ] x402 payment validation uses `timingSafeEqual` + oracle price cache
-- [ ] Admin updates require dual auth: Telegram `chat.id` + `user.id` whitelist
+- [ ] x402 payment validation uses JWT + JWKS + CoinGecko oracle price cache (`mode: 'premium'` in `verifyX402Payment`)
+- [ ] Admin updates require dual auth: Telegram `chat.id` + `user.id` whitelist **or** JWT payer address in `ADMIN_WALLET_ADDRESSES`
 - [ ] All premium field updates logged to `admin_audit.log` with before/after diff
-- [ ] API responses never include `premiumForensics` without valid payment header
-- [ ] Frontend escapes all premium field values before DOM insertion
+- [ ] API responses never include `premiumForensics` without valid payment header (enforced by `select: false` + `formatWalletResponse`)
+- [ ] Frontend escapes all premium field values before DOM insertion (`escapeHtml()` in `renderPremiumCard`)
 
 ### Admin Workflow (Telegram Bot)
 
