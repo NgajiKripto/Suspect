@@ -197,7 +197,7 @@ bot.on('message', async (msg) => {
   // Only process messages from the authorized chat
   if (String(msg.chat.id) !== String(chatId)) return;
 
-  if (!msg.text.includes('LiquidityBefore')) return;
+  if (!msg.text || !msg.text.includes('LiquidityBefore')) return;
 
   const lines = msg.text.split('\n');
   const data = {};
@@ -466,57 +466,65 @@ bot.on('message', async (msg) => {
   // open if the onText handler fires second.
   if (text === '/cancel') return;
 
-  // /skip — leave the current field blank and advance to the next
-  if (text === '/skip') {
-    const currentIndex = PREMIUM_WORKFLOW_FIELDS.indexOf(state.currentField);
-    const nextIndex    = currentIndex + 1;
+  try {
+    // /skip — leave the current field blank and advance to the next
+    if (text === '/skip') {
+      const currentIndex = PREMIUM_WORKFLOW_FIELDS.indexOf(state.currentField);
+      const nextIndex    = currentIndex + 1;
+
+      if (nextIndex >= PREMIUM_WORKFLOW_FIELDS.length) {
+        workflowState.clear(adminChatId);
+        await showWorkflowConfirmation(adminChatId, state);
+      } else {
+        const nextField = PREMIUM_WORKFLOW_FIELDS[nextIndex];
+        workflowState.set(adminChatId, Object.assign({}, state, { currentField: nextField }));
+        await bot.sendMessage(chatId, WORKFLOW_FIELD_PROMPTS[nextField]);
+      }
+      return;
+    }
+
+    // Ignore other slash commands while workflow is active
+    if (text.startsWith('/')) return;
+
+    // Parse the current field value (array fields require comma-splitting)
+    const { currentField } = state;
+    let parsedValue;
+    if (ARRAY_PREMIUM_FIELDS.has(currentField)) {
+      parsedValue = text.split(',').map(s => s.trim()).filter(Boolean);
+    } else {
+      parsedValue = text;
+    }
+
+    // Validate using the same rules as the PATCH endpoint
+    const errors = validatePremiumFields({ [currentField]: parsedValue });
+    if (errors.length > 0) {
+      await bot.sendMessage(
+        chatId,
+        `❌ Invalid value:\n\n${errors.map(e => `• ${e}`).join('\n')}\n\nPlease try again or send /skip to leave blank.`
+      );
+      return;
+    }
+
+    // Store validated value and advance to next field
+    const collectedData = Object.assign({}, state.collectedData, { [currentField]: parsedValue });
+    const currentIndex  = PREMIUM_WORKFLOW_FIELDS.indexOf(currentField);
+    const nextIndex     = currentIndex + 1;
 
     if (nextIndex >= PREMIUM_WORKFLOW_FIELDS.length) {
+      // All 6 fields collected — show confirmation preview
       workflowState.clear(adminChatId);
-      await showWorkflowConfirmation(adminChatId, state);
+      await showWorkflowConfirmation(adminChatId, Object.assign({}, state, { collectedData }));
     } else {
       const nextField = PREMIUM_WORKFLOW_FIELDS[nextIndex];
-      workflowState.set(adminChatId, Object.assign({}, state, { currentField: nextField }));
+      workflowState.set(adminChatId, Object.assign({}, state, { currentField: nextField, collectedData }));
       await bot.sendMessage(chatId, WORKFLOW_FIELD_PROMPTS[nextField]);
     }
-    return;
-  }
-
-  // Ignore other slash commands while workflow is active
-  if (text.startsWith('/')) return;
-
-  // Parse the current field value (array fields require comma-splitting)
-  const { currentField } = state;
-  let parsedValue;
-  if (ARRAY_PREMIUM_FIELDS.has(currentField)) {
-    parsedValue = text.split(',').map(s => s.trim()).filter(Boolean);
-  } else {
-    parsedValue = text;
-  }
-
-  // Validate using the same rules as the PATCH endpoint
-  const errors = validatePremiumFields({ [currentField]: parsedValue });
-  if (errors.length > 0) {
-    await bot.sendMessage(
-      chatId,
-      `❌ Invalid value:\n\n${errors.map(e => `• ${e}`).join('\n')}\n\nPlease try again or send /skip to leave blank.`
-    );
-    return;
-  }
-
-  // Store validated value and advance to next field
-  const collectedData = Object.assign({}, state.collectedData, { [currentField]: parsedValue });
-  const currentIndex  = PREMIUM_WORKFLOW_FIELDS.indexOf(currentField);
-  const nextIndex     = currentIndex + 1;
-
-  if (nextIndex >= PREMIUM_WORKFLOW_FIELDS.length) {
-    // All 6 fields collected — show confirmation preview
+  } catch (err) {
+    console.error('[bot] premium_add workflow error:', err);
     workflowState.clear(adminChatId);
-    await showWorkflowConfirmation(adminChatId, Object.assign({}, state, { collectedData }));
-  } else {
-    const nextField = PREMIUM_WORKFLOW_FIELDS[nextIndex];
-    workflowState.set(adminChatId, Object.assign({}, state, { currentField: nextField, collectedData }));
-    await bot.sendMessage(chatId, WORKFLOW_FIELD_PROMPTS[nextField]);
+    try {
+      await bot.sendMessage(chatId, '❌ An error occurred during premium data entry. The workflow has been reset. Please try again.');
+    } catch (_) { /* ignore secondary failure */ }
   }
 });
 
@@ -777,7 +785,7 @@ async function handlePremiumAdd(query, parts) {
     return bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
   }
 
-  const adminChatId = String(chatId);
+  const adminChatId = String(query.message.chat.id);
 
   // Guard: if a workflow is already in progress, do not silently overwrite it.
   const existing = workflowState.get(adminChatId);
@@ -840,10 +848,10 @@ async function handlePremiumEdit(query, parts) {
   };
 
   const timeoutId = setTimeout(
-    () => pendingFieldEdit.delete(String(chatId)),
+    () => pendingFieldEdit.delete(String(query.message.chat.id)),
     10 * 60 * 1000
   );
-  pendingFieldEdit.set(String(chatId), {
+  pendingFieldEdit.set(String(query.message.chat.id), {
     walletId:      wallet._id,
     walletAddress: wallet.walletAddress,
     caseNumber:    wallet.caseNumber,
@@ -1131,8 +1139,15 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  if (!await routeCallback(query)) {
-    await bot.answerCallbackQuery(query.id, { text: 'Unknown action' });
+  try {
+    if (!await routeCallback(query)) {
+      await bot.answerCallbackQuery(query.id, { text: 'Unknown action' });
+    }
+  } catch (err) {
+    console.error('[bot] callback_query error:', err);
+    try {
+      await bot.answerCallbackQuery(query.id, { text: '❌ An error occurred. Please try again.' });
+    } catch (_) { /* ignore secondary failure */ }
   }
 });
 
