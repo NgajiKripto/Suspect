@@ -21,6 +21,7 @@ const {
   parsePremiumInput,
   validatePremiumFields,
   buildPremiumPreview,
+  buildDeletePreview,
   PREMIUM_HELP_TEXT,
   PREMIUM_INPUT_KEYS,
   CAMEL_TO_KEY,
@@ -125,6 +126,8 @@ const pendingFieldEdit = new Map();
 const pendingEditConfirm = new Map();
 // Stores bulk-field diff awaiting confirmation: confirmKey → { walletId, walletAddress, caseNumber, currentData, parsed }
 const pendingBulkEdit = new Map();
+// Stores delete confirmations awaiting admin approval: confirmKey → { walletId, walletAddress, caseNumber, premiumSnapshot }
+const pendingDelete = new Map();
 
 // Per-admin edit rate limiter: chatId → { count, windowStart }
 const adminEditRateLimiter = new Map();
@@ -401,6 +404,128 @@ bot.onText(/\/canceledit/, async (msg) => {
   } else {
     await bot.sendMessage(chatId, 'No active field edit to cancel.');
   }
+});
+
+/**
+ * Look up a verified wallet by case number or Solana address.
+ *
+ * @param {string}  query          Raw admin input (numeric case number or address).
+ * @param {boolean} [withPremium]  When true, includes the premiumForensics subdocument.
+ * @returns {Promise<{wallet: object|null, error: string|null}>}
+ *   wallet is null when not found or input is invalid; error contains a
+ *   user-facing error message in that case (null when wallet was found).
+ */
+async function lookupVerifiedWallet(query, withPremium = false) {
+  const selectStr = withPremium ? '+premiumForensics' : undefined;
+
+  if (/^\d+$/.test(query)) {
+    const wallet = await (selectStr
+      ? Wallet.findOne({ caseNumber: parseInt(query, 10), status: 'verified' }).select(selectStr)
+      : Wallet.findOne({ caseNumber: parseInt(query, 10), status: 'verified' }));
+    if (!wallet) return { wallet: null, error: '❌ No verified wallet found for that case number or address.' };
+    return { wallet, error: null };
+  }
+
+  if (WALLET_ADDRESS_REGEX.test(query)) {
+    const wallet = await (selectStr
+      ? Wallet.findOne({ walletAddress: query, status: 'verified' }).select(selectStr)
+      : Wallet.findOne({ walletAddress: query, status: 'verified' }));
+    if (!wallet) return { wallet: null, error: '❌ No verified wallet found for that case number or address.' };
+    return { wallet, error: null };
+  }
+
+  return { wallet: null, error: '❌ Invalid input. Provide a numeric case number or a valid Solana wallet address.' };
+}
+
+// /add_premium [caseNumber|walletAddress] — proactively start a premium data add workflow
+bot.onText(/\/add_premium(?:\s+(.+))?/, async (msg, match) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+
+  const query = match[1]?.trim();
+  if (!query) {
+    await bot.sendMessage(
+      chatId,
+      'Usage: /add_premium [caseNumber] or [walletAddress]\n\nExample:\n  /add_premium 42\n  /add_premium So11111111111111111111111111111111111111112'
+    );
+    return;
+  }
+
+  const { wallet, error } = await lookupVerifiedWallet(query, false);
+  if (error) {
+    await bot.sendMessage(chatId, error);
+    return;
+  }
+
+  const adminChatId = String(msg.chat.id);
+
+  // Guard: abort if a workflow is already in progress for this chat
+  const existing = workflowState.get(adminChatId);
+  if (existing) {
+    await bot.sendMessage(
+      chatId,
+      `⚠️ You already have an active premium data entry in progress (Case #${existing.caseNumber}).\n\n` +
+      `Send /cancel to discard it, then try again.`
+    );
+    return;
+  }
+
+  workflowState.set(adminChatId, {
+    workflow:      'premium_add',
+    walletId:      wallet._id,
+    walletAddress: wallet.walletAddress,
+    caseNumber:    wallet.caseNumber,
+    currentField:  PREMIUM_WORKFLOW_FIELDS[0],
+    collectedData: {}
+  });
+
+  await bot.sendMessage(
+    chatId,
+    `📝 Premium data entry for Case #${wallet.caseNumber}\n(${wallet.walletAddress})\n\n` +
+    `Answer each prompt in sequence.\nSend /skip to leave a field blank.\nSend /cancel to abort.\n\n` +
+    WORKFLOW_FIELD_PROMPTS[PREMIUM_WORKFLOW_FIELDS[0]]
+  );
+});
+
+// /delete_premium [caseNumber|walletAddress] — delete all premium forensic data from a wallet
+bot.onText(/\/delete_premium(?:\s+(.+))?/, async (msg, match) => {
+  if (String(msg.chat.id) !== String(chatId)) return;
+
+  const query = match[1]?.trim();
+  if (!query) {
+    await bot.sendMessage(
+      chatId,
+      'Usage: /delete_premium [caseNumber] or [walletAddress]\n\nExample:\n  /delete_premium 42\n  /delete_premium So11111111111111111111111111111111111111112'
+    );
+    return;
+  }
+
+  const { wallet, error } = await lookupVerifiedWallet(query, true);
+  if (error) {
+    await bot.sendMessage(chatId, error);
+    return;
+  }
+
+  const currentData = wallet.premiumForensics ? wallet.premiumForensics.toObject() : {};
+  const confirmKey  = crypto.randomBytes(8).toString('hex');
+
+  pendingDelete.set(confirmKey, {
+    walletId:         wallet._id,
+    walletAddress:    wallet.walletAddress,
+    caseNumber:       wallet.caseNumber,
+    premiumSnapshot:  currentData
+  });
+  // Auto-expire after 5 minutes
+  setTimeout(() => pendingDelete.delete(confirmKey), 5 * 60 * 1000);
+
+  const preview = buildDeletePreview(wallet.caseNumber, wallet.walletAddress, currentData);
+  await bot.sendMessage(chatId, preview, {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '🗑️ Delete', callback_data: `${CALLBACK.PREMIUM_DELETE}${confirmKey}` },
+        { text: '❌ Cancel', callback_data: `cancel:delete:${confirmKey}` }
+      ]]
+    }
+  });
 });
 
 // /cancel command — abort any active multi-step premium_add workflow
@@ -1058,13 +1183,74 @@ async function handlePremiumConfirm(query, parts) {
 }
 
 /**
+ * handle: premium:delete:<confirmKey>   (CALLBACK.PREMIUM_DELETE)
+ * Execute a confirmed premium data deletion for a wallet.
+ *
+ * The admin triggers this by sending /delete_premium [case|address], which
+ * stores a premiumSnapshot in pendingDelete and shows a Confirm/Cancel prompt.
+ * Clicking [🗑️ Delete] routes here to wipe all premiumForensics fields.
+ */
+async function handlePremiumDelete(query, parts) {
+  // parts: ['premium', 'delete', '<confirmKey>']
+  const confirmKey = parts.slice(2).join(':');
+  const pending    = pendingDelete.get(confirmKey);
+
+  if (!pending) {
+    await bot.answerCallbackQuery(query.id, { text: '❌ Delete request expired or not found.' });
+    return true;
+  }
+
+  pendingDelete.delete(confirmKey);
+
+  const { walletId, walletAddress, caseNumber, premiumSnapshot } = pending;
+
+  const wallet = await Wallet.findById(walletId).select('+premiumForensics');
+  if (!wallet) {
+    await bot.answerCallbackQuery(query.id, { text: '❌ Wallet not found.' });
+    return true;
+  }
+
+  if (wallet.status !== 'verified') {
+    await bot.answerCallbackQuery(query.id, { text: '❌ Wallet is no longer verified.' });
+    return true;
+  }
+
+  // Clear all premiumForensics fields
+  if (wallet.premiumForensics) {
+    for (const field of PREMIUM_WORKFLOW_FIELDS) {
+      wallet.premiumForensics[field] = undefined;
+    }
+  }
+  await wallet.save();
+
+  await writeAuditLog({
+    action:        'premium_delete',
+    walletAddress,
+    caseNumber,
+    changedBy:     { source: 'telegram', identifier: String(query.from?.id || 'unknown') },
+    fieldsChanged: Object.keys(premiumSnapshot).filter(k => premiumSnapshot[k] !== undefined),
+    before:        premiumSnapshot,
+    after:         {},
+    ipHash:        null
+  });
+
+  await bot.answerCallbackQuery(query.id, { text: '🗑️ Deleted.' });
+  await bot.sendMessage(
+    chatId,
+    `🗑️ Premium data deleted for Case #${caseNumber}\n(${walletAddress})`
+  );
+  return true;
+}
+
+/**
  * handle: cancel:<subtype>:<key>   (CALLBACK.CANCEL)
  * Cancel a pending premium data change.
  *
  * Subtypes:
- *   add  — cancel a full ADD_LIQ/... entry  (was cancelpremium)
- *   edit — cancel a single-field diff        (was canceledit)
- *   bulk — cancel a NEW_VALUES bulk update   (was cancelbulkedit)
+ *   add    — cancel a full ADD_LIQ/... entry  (was cancelpremium)
+ *   edit   — cancel a single-field diff        (was canceledit)
+ *   bulk   — cancel a NEW_VALUES bulk update   (was cancelbulkedit)
+ *   delete — cancel a pending premium delete
  *
  * Example callback_data: `cancel:add:${confirmKey}`
  */
@@ -1094,6 +1280,13 @@ async function handleCancel(query, parts) {
     return true;
   }
 
+  if (subtype === 'delete') {
+    pendingDelete.delete(confirmKey);
+    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' });
+    await bot.sendMessage(chatId, '❌ Premium data deletion cancelled.');
+    return true;
+  }
+
   // Unknown subtype
   return false;
 }
@@ -1107,6 +1300,7 @@ async function handleCancel(query, parts) {
  *   CALLBACK.PREMIUM_ADD     ('premium:add:')      → handlePremiumAdd
  *   CALLBACK.PREMIUM_EDIT    ('premium:edit:')     → handlePremiumEdit
  *   CALLBACK.PREMIUM_CONFIRM ('premium:confirm:')  → handlePremiumConfirm
+ *   CALLBACK.PREMIUM_DELETE  ('premium:delete:')   → handlePremiumDelete
  *   CALLBACK.CANCEL          ('cancel')            → handleCancel
  *   'review:'                                      → handleReview
  *   'reject:'                                      → handleReject
@@ -1123,6 +1317,7 @@ async function routeCallback(query) {
   if (data.startsWith(CALLBACK.PREMIUM_CONFIRM)) return handlePremiumConfirm(query, parts);
   if (data.startsWith(CALLBACK.PREMIUM_ADD))     return handlePremiumAdd(query, parts);
   if (data.startsWith(CALLBACK.PREMIUM_EDIT))    return handlePremiumEdit(query, parts);
+  if (data.startsWith(CALLBACK.PREMIUM_DELETE))  return handlePremiumDelete(query, parts);
   if (data.startsWith(CALLBACK.VERIFY))          return handleVerify(query, parts);
   if (data.startsWith(CALLBACK.CANCEL))          return handleCancel(query, parts);
   if (data.startsWith('review:'))                return handleReview(query, parts);

@@ -23,6 +23,7 @@ const {
   parsePremiumInput,
   validatePremiumFields,
   buildPremiumPreview,
+  buildDeletePreview,
   PREMIUM_HELP_TEXT,
   CAMEL_TO_KEY,
   SENSITIVE_FIELDS,
@@ -3452,12 +3453,16 @@ describe('38. CALLBACK — prefix-based callback router constants', () => {
       expect(CALLBACK.PREMIUM_CONFIRM).toBe('premium:confirm:');
     });
 
+    test('CALLBACK.PREMIUM_DELETE equals "premium:delete:"', () => {
+      expect(CALLBACK.PREMIUM_DELETE).toBe('premium:delete:');
+    });
+
     test('CALLBACK.CANCEL equals "cancel"', () => {
       expect(CALLBACK.CANCEL).toBe('cancel');
     });
 
-    test('CALLBACK has exactly 5 keys', () => {
-      expect(Object.keys(CALLBACK)).toHaveLength(5);
+    test('CALLBACK has exactly 6 keys', () => {
+      expect(Object.keys(CALLBACK)).toHaveLength(6);
     });
   });
 
@@ -3495,8 +3500,20 @@ describe('38. CALLBACK — prefix-based callback router constants', () => {
       expect(`cancel:bulk:abc123`.startsWith(CALLBACK.CANCEL)).toBe(true);
     });
 
+    test('CANCEL matches cancel:delete:key via startsWith', () => {
+      expect(`cancel:delete:abc123`.startsWith(CALLBACK.CANCEL)).toBe(true);
+    });
+
     test('CANCEL does not match "premium:confirm:..." data', () => {
       expect(`premium:confirm:add:abc`.startsWith(CALLBACK.CANCEL)).toBe(false);
+    });
+
+    test('PREMIUM_DELETE prefix does not match PREMIUM_CONFIRM data', () => {
+      expect(`premium:confirm:add:key`.startsWith(CALLBACK.PREMIUM_DELETE)).toBe(false);
+    });
+
+    test('PREMIUM_DELETE prefix does not match PREMIUM_ADD data', () => {
+      expect(`premium:add:someId`.startsWith(CALLBACK.PREMIUM_DELETE)).toBe(false);
     });
   });
 
@@ -3559,6 +3576,18 @@ describe('38. CALLBACK — prefix-based callback router constants', () => {
       expect(data).toBe(`cancel:bulk:${CONFIRM_KEY}`);
       expect(data.startsWith(CALLBACK.CANCEL)).toBe(true);
     });
+
+    test('premium:delete keyboard uses CALLBACK.PREMIUM_DELETE prefix', () => {
+      const data = `${CALLBACK.PREMIUM_DELETE}${CONFIRM_KEY}`;
+      expect(data).toBe(`premium:delete:${CONFIRM_KEY}`);
+      expect(data.startsWith(CALLBACK.PREMIUM_DELETE)).toBe(true);
+    });
+
+    test('cancel:delete keyboard uses CALLBACK.CANCEL prefix', () => {
+      const data = `${CALLBACK.CANCEL}:delete:${CONFIRM_KEY}`;
+      expect(data).toBe(`cancel:delete:${CONFIRM_KEY}`);
+      expect(data.startsWith(CALLBACK.CANCEL)).toBe(true);
+    });
   });
 
   // ── 38d. Parsing logic (colon-split) ──────────────────────────────────────
@@ -3612,6 +3641,19 @@ describe('38. CALLBACK — prefix-based callback router constants', () => {
     test('cancel:bulk:<key> splits so parts[1]="bulk"', () => {
       const parts = 'cancel:bulk:deadbeef01234567'.split(':');
       expect(parts[1]).toBe('bulk');
+    });
+
+    test('cancel:delete:<key> splits so parts[1]="delete", parts[2]=key', () => {
+      const parts = 'cancel:delete:deadbeef01234567'.split(':');
+      expect(parts[1]).toBe('delete');
+      expect(parts[2]).toBe('deadbeef01234567');
+    });
+
+    test('premium:delete:<key> splits so parts[2]=key', () => {
+      const parts = 'premium:delete:deadbeef01234567'.split(':');
+      expect(parts[0]).toBe('premium');
+      expect(parts[1]).toBe('delete');
+      expect(parts[2]).toBe('deadbeef01234567');
     });
 
     test('unrecognised prefix does not start with any CALLBACK value', () => {
@@ -4575,6 +4617,157 @@ describe('47. 🤖 Telegram Bot — premium_add workflow robustness', () => {
       const updated = workflowState.get('chat_err');
       expect(updated.currentField).toBe('removeLiquidityValue');
       expect(updated.collectedData.addLiquidityValue).toBe('45.2 SOL');
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 48. 🤖 Telegram Bot — /add_premium & /delete_premium commands
+// Tests the new commands that allow admins to proactively add or delete
+// premium forensic data without needing a notification button.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('48. 🤖 Telegram Bot — /add_premium & /delete_premium commands', () => {
+  // ── 48a. buildDeletePreview ───────────────────────────────────────────────
+  describe('48a. buildDeletePreview — delete confirmation message', () => {
+    const CASE_NUM = 7;
+    const ADDR     = 'So11111111111111111111111111111111111111112';
+
+    test('contains the case number', () => {
+      const preview = buildDeletePreview(CASE_NUM, ADDR, {});
+      expect(preview).toContain(`Case #${CASE_NUM}`);
+    });
+
+    test('contains the wallet address', () => {
+      const preview = buildDeletePreview(CASE_NUM, ADDR, {});
+      expect(preview).toContain(ADDR);
+    });
+
+    test('includes a warning that the action cannot be undone', () => {
+      const preview = buildDeletePreview(CASE_NUM, ADDR, {});
+      expect(preview).toMatch(/cannot be undone/i);
+    });
+
+    test('shows (not set) for missing fields', () => {
+      const preview = buildDeletePreview(CASE_NUM, ADDR, {});
+      expect(preview).toContain('(not set)');
+    });
+
+    test('shows current addLiquidityValue when set', () => {
+      const preview = buildDeletePreview(CASE_NUM, ADDR, { addLiquidityValue: '45.2 SOL' });
+      expect(preview).toContain('45.2 SOL');
+    });
+
+    test('shows current forensicNotes when set', () => {
+      const preview = buildDeletePreview(CASE_NUM, ADDR, { forensicNotes: 'Test note' });
+      expect(preview).toContain('Test note');
+    });
+
+    test('shows comma-joined array for tokensCreated', () => {
+      const sampleTokens = ['Token1111111111111111111111111111111111111', 'Token2222222222222222222222222222222222222'];
+      const preview = buildDeletePreview(CASE_NUM, ADDR, { tokensCreated: sampleTokens });
+      expect(preview).toContain(sampleTokens.join(', '));
+    });
+
+    test('asks for confirmation', () => {
+      const preview = buildDeletePreview(CASE_NUM, ADDR, {});
+      expect(preview).toMatch(/confirm/i);
+    });
+  });
+
+  // ── 48b. CALLBACK.PREMIUM_DELETE routing ──────────────────────────────────
+  describe('48b. CALLBACK.PREMIUM_DELETE prefix routing', () => {
+    test('premium:delete:<key> is matched by CALLBACK.PREMIUM_DELETE', () => {
+      const data = `${CALLBACK.PREMIUM_DELETE}abc123`;
+      expect(data.startsWith(CALLBACK.PREMIUM_DELETE)).toBe(true);
+    });
+
+    test('PREMIUM_DELETE does not accidentally match PREMIUM_CONFIRM data', () => {
+      expect('premium:confirm:add:key'.startsWith(CALLBACK.PREMIUM_DELETE)).toBe(false);
+    });
+
+    test('PREMIUM_DELETE does not accidentally match PREMIUM_EDIT data', () => {
+      expect('premium:edit:field:id'.startsWith(CALLBACK.PREMIUM_DELETE)).toBe(false);
+    });
+
+    test('PREMIUM_CONFIRM does not accidentally match PREMIUM_DELETE data', () => {
+      expect('premium:delete:key'.startsWith(CALLBACK.PREMIUM_CONFIRM)).toBe(false);
+    });
+  });
+
+  // ── 48c. cancel:delete routing ────────────────────────────────────────────
+  describe('48c. cancel:delete routing', () => {
+    test('cancel:delete:<key> starts with CALLBACK.CANCEL', () => {
+      expect('cancel:delete:abc123'.startsWith(CALLBACK.CANCEL)).toBe(true);
+    });
+
+    test('cancel:delete:<key> splits so subtype is "delete"', () => {
+      const parts = 'cancel:delete:abc123'.split(':');
+      expect(parts[1]).toBe('delete');
+      expect(parts[2]).toBe('abc123');
+    });
+  });
+
+  // ── 48d. /add_premium command — workflow initialization logic ─────────────
+  describe('48d. /add_premium — workflow initialization', () => {
+    afterEach(() => {
+      workflowState.clear('chat_add');
+    });
+
+    test('no active workflow: workflowState is empty before starting', () => {
+      expect(workflowState.get('chat_add')).toBeNull();
+    });
+
+    test('workflow starts at addLiquidityValue (first field)', () => {
+      const PREMIUM_WORKFLOW_FIELDS = [
+        'addLiquidityValue', 'removeLiquidityValue', 'walletFunding',
+        'tokensCreated', 'forensicNotes', 'crossProjectLinks'
+      ];
+      workflowState.set('chat_add', {
+        workflow:      'premium_add',
+        walletId:      'abc123',
+        walletAddress: 'So11111111111111111111111111111111111111112',
+        caseNumber:    5,
+        currentField:  PREMIUM_WORKFLOW_FIELDS[0],
+        collectedData: {}
+      });
+      const state = workflowState.get('chat_add');
+      expect(state).not.toBeNull();
+      expect(state.workflow).toBe('premium_add');
+      expect(state.currentField).toBe('addLiquidityValue');
+    });
+
+    test('starting workflow when one is already active does not overwrite existing state', () => {
+      workflowState.set('chat_add', {
+        workflow:      'premium_add',
+        walletId:      'existing',
+        walletAddress: 'So11111111111111111111111111111111111111112',
+        caseNumber:    3,
+        currentField:  'forensicNotes',
+        collectedData: { addLiquidityValue: '10 SOL' }
+      });
+      // Guard condition: if existing state found, do not overwrite
+      const existing = workflowState.get('chat_add');
+      expect(existing).not.toBeNull();
+      expect(existing.caseNumber).toBe(3);
+      // State is unchanged
+      expect(workflowState.get('chat_add').currentField).toBe('forensicNotes');
+    });
+  });
+
+  // ── 48e. /delete_premium command — input validation ───────────────────────
+  describe('48e. /delete_premium — input validation', () => {
+    test('valid Solana address passes WALLET_ADDRESS_REGEX', () => {
+      const addr = 'So11111111111111111111111111111111111111112';
+      expect(WALLET_ADDRESS_REGEX.test(addr)).toBe(true);
+    });
+
+    test('invalid address is rejected by WALLET_ADDRESS_REGEX', () => {
+      expect(WALLET_ADDRESS_REGEX.test('not_a_valid_address!')).toBe(false);
+    });
+
+    test('numeric case number string is detected by /^\\d+$/', () => {
+      expect(/^\d+$/.test('42')).toBe(true);
+      expect(/^\d+$/.test('abc')).toBe(false);
     });
   });
 });

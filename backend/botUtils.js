@@ -257,6 +257,38 @@ function buildDiffPreview(caseNumber, fieldLabel, oldValue, newValue, isSensitiv
 }
 
 /**
+ * Build a confirmation preview message for a premium data delete operation,
+ * showing all currently-stored forensic fields that will be wiped.
+ *
+ * @param {number|string} caseNumber
+ * @param {string}        walletAddress
+ * @param {Object}        currentData  Current premiumForensics values
+ * @returns {string}
+ */
+function buildDeletePreview(caseNumber, walletAddress, currentData) {
+  const fmt = (val) => {
+    if (val === undefined || val === null) return '(not set)';
+    return Array.isArray(val) ? val.join(', ') : String(val);
+  };
+
+  return [
+    `🗑️ Delete Premium Data — Case #${caseNumber}`,
+    `Wallet: ${walletAddress}`,
+    '',
+    'The following data will be permanently removed:',
+    '',
+    `ADD_LIQ: ${fmt(currentData.addLiquidityValue)}`,
+    `REM_LIQ: ${fmt(currentData.removeLiquidityValue)}`,
+    `FUNDING: ${fmt(currentData.walletFunding)}`,
+    `TOKENS:  ${fmt(currentData.tokensCreated)}`,
+    `NOTES:   ${fmt(currentData.forensicNotes)}`,
+    `LINKS:   ${fmt(currentData.crossProjectLinks)}`,
+    '',
+    '⚠️  This action cannot be undone. Confirm deletion?'
+  ].join('\n');
+}
+
+/**
  * Build a diff preview message for a bulk (multi-field) update.
  * Only fields that actually differ from the current stored values are listed.
  *
@@ -309,15 +341,18 @@ function buildBulkDiffPreview(caseNumber, walletAddress, currentData, newData) {
  *   PREMIUM_CONFIRM → 'premium:confirm:' e.g. premium:confirm:add:<key>
  *                                             premium:confirm:edit:<key>
  *                                             premium:confirm:bulk:<key>
+ *   PREMIUM_DELETE  → 'premium:delete:'  e.g. premium:delete:<confirmKey>
  *   CANCEL          → 'cancel'           e.g. cancel:add:<key>
  *                                             cancel:edit:<key>
  *                                             cancel:bulk:<key>
+ *                                             cancel:delete:<key>
  */
 const CALLBACK = {
   VERIFY:          'verify:',
   PREMIUM_ADD:     'premium:add:',
   PREMIUM_EDIT:    'premium:edit:',
   PREMIUM_CONFIRM: 'premium:confirm:',
+  PREMIUM_DELETE:  'premium:delete:',
   CANCEL:          'cancel'
 };
 
@@ -325,6 +360,7 @@ module.exports = {
   parsePremiumInput,
   validatePremiumFields,
   buildPremiumPreview,
+  buildDeletePreview,
   PREMIUM_HELP_TEXT,
   PREMIUM_INPUT_KEYS,
   CAMEL_TO_KEY,
