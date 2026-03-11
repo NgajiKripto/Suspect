@@ -1558,6 +1558,27 @@
             : 'https://suspected.dev/api';  // Change when deploying
 
         // ==========================================
+        // BROWSER CONSOLE DEBUG COMMANDS
+        // ==========================================
+        // Paste these in the browser DevTools console to diagnose API issues.
+        // API_BASE_URL is defined in this script scope and available in the console
+        // when the page is open. Alternatively, replace API_BASE_URL with the
+        // literal URL: 'https://suspected.dev/api' (production) or
+        // 'http://localhost:3000/api' (local development).
+        //
+        //   // 1. Check API health and database status:
+        //   fetch(API_BASE_URL + '/health').then(r => r.json()).then(console.log)
+        //
+        //   // 2. Fetch verified wallet list:
+        //   fetch(API_BASE_URL + '/wallets?status=verified&limit=5').then(r => r.json()).then(console.log)
+        //
+        //   // 3. Check CORS headers (look for Access-Control-Allow-Origin):
+        //   fetch(API_BASE_URL + '/health').then(r => { console.log([...r.headers]); return r.json(); }).then(console.log)
+        //
+        //   // 4. Inspect last API error:
+        //   fetch(API_BASE_URL + '/wallets?status=verified&limit=5').then(r => r.ok ? r.json() : r.json().then(e => { throw e; })).then(console.log).catch(console.error)
+
+        // ==========================================
         // AUTO-REFRESH CONFIGURATION
         // ==========================================
         let walletRefreshInterval = null;
@@ -1898,7 +1919,7 @@
             isLoadingWallets = true;
             
             try {
-                const response = await fetch(`${API_BASE_URL}/wallets?status=verified&limit=20`);
+                const response = await fetch(`${API_BASE_URL}/wallets?status=verified&limit=5`);
                 
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}`);

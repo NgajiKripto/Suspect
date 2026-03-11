@@ -15,6 +15,7 @@
 
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const cors = require('cors');
 const helmet = require('helmet');
 const crypto = require('crypto');
 const request = require('supertest');
@@ -76,6 +77,11 @@ function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecre
   // Public list — no forensic data
   app.get('/api/wallets', (_req, res) => {
     res.json({ success: true, data: [{ walletAddress: 'So11111111111111111111111111111111111111112', status: 'verified', riskScore: 95 }] });
+  });
+
+  // Health check endpoint (mirrors production)
+  app.get('/api/health', (_req, res) => {
+    res.status(200).json({ success: true, status: 'ok', db: 'connected', timestamp: new Date().toISOString() });
   });
 
   // Public detail — no forensic data, no reporterContact
@@ -4320,5 +4326,93 @@ describe('43. 📝 Audit Logging', () => {
 
     const entries = await psReadNewLogEntries(baseline);
     expect(entries.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ─── Helper: build a CORS-enabled test app mirroring server.js logic ─────────
+function buildCorsTestApp(allowedOrigins) {
+  const app = express();
+  app.use(cors({
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      callback(new Error('Not allowed by CORS'));
+    },
+    methods: ['GET', 'POST', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'x402-payment', 'x-admin-token', 'x-telegram-admin-token']
+  }));
+  app.use(express.json());
+  app.get('/api/health', (_req, res) => {
+    res.status(200).json({ success: true, status: 'ok', db: 'connected', timestamp: new Date().toISOString() });
+  });
+  app.get('/api/wallets', (_req, res) => {
+    res.json({ success: true, data: [] });
+  });
+  return app;
+}
+
+describe('44. GET /api/health — health check endpoint', () => {
+  const app = buildTestApp();
+
+  test('returns 200 with success:true and required fields', async () => {
+    const res = await request(app).get('/api/health');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('success', true);
+    expect(res.body).toHaveProperty('status', 'ok');
+    expect(res.body).toHaveProperty('db', 'connected');
+    expect(res.body).toHaveProperty('timestamp');
+  });
+
+  test('timestamp is a valid ISO 8601 string', async () => {
+    const res = await request(app).get('/api/health');
+    expect(res.status).toBe(200);
+    expect(new Date(res.body.timestamp).toISOString()).toBe(res.body.timestamp);
+  });
+});
+
+describe('45. CORS — multi-origin support', () => {
+  test('allows request from the first configured origin', async () => {
+    const app = buildCorsTestApp(['https://suspected.dev', 'https://www.suspected.dev']);
+    const res = await request(app)
+      .get('/api/health')
+      .set('Origin', 'https://suspected.dev');
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBe('https://suspected.dev');
+  });
+
+  test('allows request from a second configured origin', async () => {
+    const app = buildCorsTestApp(['https://suspected.dev', 'https://www.suspected.dev']);
+    const res = await request(app)
+      .get('/api/health')
+      .set('Origin', 'https://www.suspected.dev');
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBe('https://www.suspected.dev');
+  });
+
+  test('blocks request from an unlisted origin', async () => {
+    const app = buildCorsTestApp(['https://suspected.dev']);
+    const res = await request(app)
+      .get('/api/wallets')
+      .set('Origin', 'https://evil.example.com');
+    // The cors package passes an error to Express when origin is blocked; Express
+    // responds with 500. The key assertion is that no ACAO header is set, which
+    // is what prevents the browser from granting cross-origin access.
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  test('allows requests with no Origin header (curl / server-to-server)', async () => {
+    const app = buildCorsTestApp(['https://suspected.dev']);
+    const res = await request(app).get('/api/health');
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('46. GET /api/wallets — error response format', () => {
+  test('successful response contains success:true and data array', async () => {
+    const app = buildTestApp();
+    const res = await request(app).get('/api/wallets');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('success', true);
+    expect(Array.isArray(res.body.data)).toBe(true);
   });
 });
