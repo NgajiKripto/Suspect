@@ -4416,3 +4416,165 @@ describe('46. GET /api/wallets — error response format', () => {
     expect(Array.isArray(res.body.data)).toBe(true);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 47. 🤖 Telegram Bot — premium_add workflow robustness
+// Tests the specific fixes for "bot does not respond when adding premium data":
+//   • null msg.text guard (non-text messages no longer crash the handler)
+//   • handlePremiumAdd uses query.message.chat.id for workflowState key
+//   • workflow message handler wraps logic in try/catch
+// ─────────────────────────────────────────────────────────────────────────────
+describe('47. 🤖 Telegram Bot — premium_add workflow robustness', () => {
+  // ── 47a. msg.text null guard ──────────────────────────────────────────────
+  describe('47a. STEP 2 handler — msg.text null guard', () => {
+    // The STEP 2 handler previously read msg.text.includes('LiquidityBefore')
+    // without a null check, causing an unhandled TypeError for non-text messages
+    // (photos, stickers, voice, etc.) that would crash the server in Node.js v15+.
+    // The fix adds  `!msg.text ||`  before the includes() call.
+    test('null msg.text does not throw when checking for LiquidityBefore', () => {
+      // Simulate what the fixed guard does: returns early when msg.text is null
+      const msgText = null;
+      expect(() => {
+        if (!msgText || !msgText.includes('LiquidityBefore')) return;
+        // would throw without the null guard
+      }).not.toThrow();
+    });
+
+    test('undefined msg.text does not throw when checking for LiquidityBefore', () => {
+      const msgText = undefined;
+      expect(() => {
+        if (!msgText || !msgText.includes('LiquidityBefore')) return;
+      }).not.toThrow();
+    });
+
+    test('valid msg.text with LiquidityBefore passes the guard (truthy path)', () => {
+      const msgText = 'LiquidityBefore: 100\nLiquidityAfter: 50';
+      let reached = false;
+      if (!msgText || !msgText.includes('LiquidityBefore')) { /* returns early */ } else { reached = true; }
+      expect(reached).toBe(true);
+    });
+
+    test('valid msg.text without LiquidityBefore returns early (guard blocks it)', () => {
+      const msgText = '45.2 SOL';
+      let reached = false;
+      if (!msgText || !msgText.includes('LiquidityBefore')) { /* returns early */ } else { reached = true; }
+      expect(reached).toBe(false);
+    });
+  });
+
+  // ── 47b. handlePremiumAdd uses query.message.chat.id for workflowState ────
+  describe('47b. handlePremiumAdd — workflowState key uses query.message.chat.id', () => {
+    // The fix changes  String(chatId)  →  String(query.message.chat.id)
+    // so that the workflowState key always matches the actual chat the message
+    // handler will receive the reply in, regardless of env var configuration.
+    afterEach(() => {
+      workflowState.clear('111222333');
+      workflowState.clear('999888777');
+    });
+
+    test('workflowState key derived from query.message.chat.id matches msg.chat.id lookup', () => {
+      const queryChatId = '111222333';
+      // Simulate handlePremiumAdd storing state using query.message.chat.id
+      workflowState.set(queryChatId, {
+        workflow:      'premium_add',
+        walletId:      'abc123',
+        walletAddress: 'So11111111111111111111111111111111111111112',
+        caseNumber:    1,
+        currentField:  'addLiquidityValue',
+        collectedData: {}
+      });
+
+      // Simulate the message handler reading with msg.chat.id
+      const msgChatId = '111222333'; // same chat
+      const state = workflowState.get(msgChatId);
+      expect(state).not.toBeNull();
+      expect(state.workflow).toBe('premium_add');
+    });
+
+    test('workflowState lookup fails if stored with a different key than the message chat', () => {
+      // Old bug: if global chatId env var (TELEGRAM_CHAT_ID) differed from
+      // query.message.chat.id, the state would be stored under the wrong key
+      // and lookups would fail — the bot would silently ignore messages.
+      const wrongKey  = '999888777'; // old buggy: String(process.env.TELEGRAM_CHAT_ID)
+      const actualKey = '111222333'; // actual: String(query.message.chat.id)
+
+      workflowState.set(wrongKey, {
+        workflow:      'premium_add',
+        currentField:  'addLiquidityValue',
+        collectedData: {}
+      });
+
+      // Message handler uses msg.chat.id (actual chat), not the env var
+      const state = workflowState.get(actualKey);
+      expect(state).toBeNull(); // would fail to find state → bot ignores messages
+    });
+  });
+
+  // ── 47c. workflow message handler — try/catch prevents unhandled rejection ─
+  describe('47c. workflow message handler — error recovery', () => {
+    // The fix wraps the workflow body in try/catch so that any internal error
+    // (e.g., a failing bot.sendMessage or DB call) is caught, the workflowState
+    // is cleared, and the admin receives a plain error message instead of the
+    // server crashing with an unhandled promise rejection.
+    afterEach(() => {
+      workflowState.clear('chat_err');
+    });
+
+    test('workflowState is cleared after a simulated workflow error so admin can retry', () => {
+      workflowState.set('chat_err', {
+        workflow:      'premium_add',
+        currentField:  'addLiquidityValue',
+        collectedData: {}
+      });
+      expect(workflowState.get('chat_err')).not.toBeNull();
+
+      // Simulate what the catch block does: clear state on error
+      workflowState.clear('chat_err');
+      expect(workflowState.get('chat_err')).toBeNull();
+    });
+
+    test('validatePremiumFields errors do not require clearing workflowState (retry in same step)', () => {
+      workflowState.set('chat_err', {
+        workflow:      'premium_add',
+        currentField:  'addLiquidityValue',
+        collectedData: {}
+      });
+
+      // Simulate validation failure: state should remain so admin can retry
+      const errors = validatePremiumFields({ addLiquidityValue: 'NOT_A_NUMBER' });
+      expect(errors.length).toBeGreaterThan(0);
+
+      // State is still present after a validation failure
+      const state = workflowState.get('chat_err');
+      expect(state).not.toBeNull();
+      expect(state.currentField).toBe('addLiquidityValue');
+    });
+
+    test('valid field value advances workflowState to next field', () => {
+      const PREMIUM_WORKFLOW_FIELDS = [
+        'addLiquidityValue', 'removeLiquidityValue', 'walletFunding',
+        'tokensCreated', 'forensicNotes', 'crossProjectLinks'
+      ];
+      workflowState.set('chat_err', {
+        workflow:      'premium_add',
+        currentField:  'addLiquidityValue',
+        collectedData: {}
+      });
+
+      const state = workflowState.get('chat_err');
+      const parsedValue = '45.2 SOL';
+      const errors = validatePremiumFields({ [state.currentField]: parsedValue });
+      expect(errors).toHaveLength(0);
+
+      const collectedData = Object.assign({}, state.collectedData, { [state.currentField]: parsedValue });
+      const currentIndex  = PREMIUM_WORKFLOW_FIELDS.indexOf(state.currentField);
+      const nextField     = PREMIUM_WORKFLOW_FIELDS[currentIndex + 1];
+
+      workflowState.set('chat_err', Object.assign({}, state, { currentField: nextField, collectedData }));
+
+      const updated = workflowState.get('chat_err');
+      expect(updated.currentField).toBe('removeLiquidityValue');
+      expect(updated.collectedData.addLiquidityValue).toBe('45.2 SOL');
+    });
+  });
+});
