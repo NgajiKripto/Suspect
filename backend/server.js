@@ -1129,9 +1129,13 @@ setInterval(() => workflowState.cleanup(), 5 * 60 * 1000);
 // PUBLIC LIST
 app.get('/api/wallets', async (req, res) => {
   try {
-    const wallets = await Wallet.find({ status: 'verified' })
+    const limitParam = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 1000 ? limitParam : 0;
+    let query = Wallet.find({ status: 'verified' })
       .select('-forensic -premiumForensics -__v');
-    res.json(wallets.map(w => formatWalletResponse(w)));
+    if (limit > 0) query = query.limit(limit);
+    const wallets = await query;
+    res.json({ success: true, data: wallets.map(w => formatWalletResponse(w)) });
   } catch (err) {
     console.error('GET /api/wallets error:', err.message);
     res.status(500).json({ message: 'Internal server error' });
