@@ -1592,7 +1592,7 @@
          *     → el.innerHTML === '<em>Click</em>'
          *   safeInnerHtml(el, '<strong onclick="evil()">Hi</strong>')
          *     → el.innerHTML === '<strong>Hi</strong>'
-         *   safeInnerHtml(el, '<script>alert(1)</script>text')
+         *   safeInnerHtml(el, '<script>alert(1)<\/script>text')
          *     → el.innerHTML === 'text'
          *   safeInnerHtml(el, '<img onerror="evil()" src="x">')
          *     → el.innerHTML === ''
@@ -1746,6 +1746,7 @@
             if (!canvas) return;
             
             const ctx = canvas.getContext('2d');
+            if (!ctx) return;
             let particles = [];
             let animationFrameId;
             
