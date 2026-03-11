@@ -35,8 +35,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(helmet());
+
+// Support comma-separated origins in ALLOWED_ORIGIN env var, e.g.:
+//   ALLOWED_ORIGIN=https://suspected.dev,https://www.suspected.dev
+// Requests with no Origin header (curl, Postman, server-to-server) are always allowed.
+const allowedOrigins = (process.env.ALLOWED_ORIGIN || 'https://suspected.dev')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGIN || 'https://suspected.dev',
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
   methods: ['GET', 'POST', 'PATCH'],
   allowedHeaders: ['Content-Type', 'x402-payment', 'x-admin-token', 'x-telegram-admin-token']
 }));
@@ -78,9 +91,16 @@ const HTML_TAG_REGEX = /<[^>]*>/;
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB Connected'))
   .catch(err => {
-    console.error(err);
-    process.exit(1);
+    console.error('MongoDB initial connection error:', err.message);
   });
+
+mongoose.connection.on('error', err => {
+  console.error('MongoDB connection error:', err.message);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('MongoDB disconnected — attempting automatic reconnect');
+});
 
 /**
  * ==========================
@@ -1126,6 +1146,21 @@ setInterval(() => workflowState.cleanup(), 5 * 60 * 1000);
  * ==========================
  */
 
+// HEALTH CHECK
+// curl -s https://suspected.dev/api/health | jq .
+app.get('/api/health', (_req, res) => {
+  const dbState = mongoose.connection.readyState;
+  // 0=disconnected, 1=connected, 2=connecting, 3=disconnecting
+  const dbStatus = ['disconnected', 'connected', 'connecting', 'disconnecting'][dbState] || 'unknown';
+  const isHealthy = dbState === 1;
+  res.status(isHealthy ? 200 : 503).json({
+    success: isHealthy,
+    status: isHealthy ? 'ok' : 'degraded',
+    db: dbStatus,
+    timestamp: new Date().toISOString()
+  });
+});
+
 // PUBLIC LIST
 app.get('/api/wallets', async (req, res) => {
   try {
@@ -1138,7 +1173,7 @@ app.get('/api/wallets', async (req, res) => {
     res.json({ success: true, data: wallets.map(w => formatWalletResponse(w)) });
   } catch (err) {
     console.error('GET /api/wallets error:', err.message);
-    res.status(500).json({ message: 'Internal server error' });
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
