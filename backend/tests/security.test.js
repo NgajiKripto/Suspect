@@ -75,7 +75,7 @@ function buildTestApp({ paymentSecret = 'test-secret', submitMax = 5, adminSecre
 
   // Public list — no forensic data
   app.get('/api/wallets', (_req, res) => {
-    res.json([{ walletAddress: 'So11111111111111111111111111111111111111112', status: 'verified', riskScore: 95 }]);
+    res.json({ success: true, data: [{ walletAddress: 'So11111111111111111111111111111111111111112', status: 'verified', riskScore: 95 }] });
   });
 
   // Public detail — no forensic data, no reporterContact
@@ -728,8 +728,9 @@ describe('6. Data Sensitivity — reporterContact not returned', () => {
   test('response to GET /api/wallets does not include reporterContact', async () => {
     const res = await request(app).get('/api/wallets');
     expect(res.status).toBe(200);
-    const wallets = res.body;
-    wallets.forEach(w => {
+    expect(res.body.success).toBe(true);
+    expect(Array.isArray(res.body.data)).toBe(true);
+    res.body.data.forEach(w => {
       expect(w).not.toHaveProperty('reporterContact');
       expect(w).not.toHaveProperty('forensic');
       expect(w).not.toHaveProperty('premiumForensics');
