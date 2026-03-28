@@ -110,4 +110,4 @@ Audit entries are **append-only** (file mode `0600`). Do not edit the log manual
 
 ---
 
-*Last Updated: 2026-03-09*
+*Last Updated: {{DATE}}* <!-- Replace {{DATE}} with the actual date when updating this document, e.g. 2026-03-07 -->
