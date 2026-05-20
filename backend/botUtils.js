@@ -1,9 +1,11 @@
 'use strict';
 
-// ─── Shared validation regex (mirrors server.js constants) ───────────────────
-const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-const LIQUIDITY_VALUE_REGEX = /^\d+(\.\d+)?\s*(SOL|USDC|USD)?$/i;
-const HTML_TAG_REGEX = /<[^>]*>/;
+const {
+  WALLET_ADDRESS_REGEX,
+  LIQUIDITY_VALUE_REGEX,
+  HTML_TAG_REGEX,
+  MAX_WALLET_FUNDING_LENGTH
+} = require('./constants');
 
 /**
  * Short-key to camelCase field name mapping used when parsing admin text input.
@@ -89,7 +91,7 @@ function validatePremiumFields(data) {
   if (data.walletFunding !== undefined) {
     if (
       typeof data.walletFunding !== 'string' ||
-      data.walletFunding.length > 200 ||
+      data.walletFunding.length > MAX_WALLET_FUNDING_LENGTH ||
       HTML_TAG_REGEX.test(data.walletFunding)
     ) {
       errors.push('FUNDING must be a plain string, max 200 chars, with no HTML tags');

@@ -102,3 +102,65 @@ function cleanup() {
 }
 
 module.exports = { get, set, clear, touch, cleanup, WORKFLOW_EXPIRE_MS };
+
+/**
+ * PendingStore — generic auto-expiring key-value store for pending confirmations.
+ *
+ * Replaces raw Map + setTimeout patterns used for pendingPremiumData,
+ * pendingEditConfirm, pendingBulkEdit, pendingDelete, pendingFieldEdit, etc.
+ *
+ * Interface:
+ *   - store.get(key)          → value | undefined
+ *   - store.set(key, value)   → void (auto-expires after ttlMs)
+ *   - store.delete(key)       → void
+ *   - store.has(key)          → boolean
+ *   - store.cleanup()         → void (remove expired entries — safety net)
+ *
+ * @param {number} [ttlMs=300000]  Time-to-live in milliseconds (default: 5 minutes)
+ */
+class PendingStore {
+  constructor(ttlMs = 5 * 60 * 1000) {
+    this._ttlMs = ttlMs;
+    this._store = new Map(); // key → { value, timerId, createdAt }
+  }
+
+  get(key) {
+    const entry = this._store.get(key);
+    return entry ? entry.value : undefined;
+  }
+
+  set(key, value) {
+    // Clear existing entry if overwriting
+    const existing = this._store.get(key);
+    if (existing) clearTimeout(existing.timerId);
+
+    const timerId = setTimeout(() => this._store.delete(key), this._ttlMs);
+    this._store.set(key, { value, timerId, createdAt: Date.now() });
+  }
+
+  delete(key) {
+    const entry = this._store.get(key);
+    if (entry) clearTimeout(entry.timerId);
+    this._store.delete(key);
+  }
+
+  has(key) {
+    return this._store.has(key);
+  }
+
+  cleanup() {
+    const now = Date.now();
+    for (const [key, entry] of this._store) {
+      if (now - entry.createdAt > this._ttlMs) {
+        clearTimeout(entry.timerId);
+        this._store.delete(key);
+      }
+    }
+  }
+
+  get size() {
+    return this._store.size;
+  }
+}
+
+module.exports.PendingStore = PendingStore;
