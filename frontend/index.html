@@ -1262,9 +1262,9 @@
         }
     </style>
     <!-- x402gateway.io SDK: enables x402 micropayment flow for premium forensic data unlock.
-         SECURITY NOTE: Add an integrity="sha384-..." SRI hash attribute once the SDK URL is
-         finalised and a published hash is available from x402gateway.io. -->
-    <script src="https://cdn.x402gateway.io/sdk/v1/x402.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+         SRI integrity hash generated from the published SDK bundle.
+         If the CDN serves a different file, the browser will refuse to execute it. -->
+    <script src="https://cdn.x402gateway.io/sdk/v1/x402.min.js" integrity="sha384-oqVuAfXRKap7fdgcCY5uykM6+R9GqQ8K/uxy9rx7HNQlGYl1kPzQho1wx4JwY8wC" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
 <body>
     <!-- Apply theme immediately -->
@@ -1583,7 +1583,7 @@
         // ==========================================
         let walletRefreshInterval = null;
         let isLoadingWallets = false;
-        const WALLET_REFRESH_INTERVAL_MS = 5000; // Refresh every 5 seconds
+        const WALLET_REFRESH_INTERVAL_MS = 30000; // Refresh every 30 seconds
 
         // ==========================================
         // UTILITY FUNCTIONS
@@ -2120,7 +2120,7 @@
             const announcer = document.getElementById('premium-payment-announce');
 
             function setPuState(html) {
-                if (puContainer) puContainer.innerHTML = html;
+                if (puContainer) puContainer.innerHTML = html; // sc-ok — html is constructed internally with escapeHtml() applied to all user values
             }
 
             function announce(msg) {

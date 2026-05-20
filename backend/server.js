@@ -17,6 +17,15 @@ const { requireAccess } = require('./middleware/requireAccess');
 const { writeAuditLog, hashIp, AUDIT_LOG_PATH } = require('./auditLog');
 const { formatWalletResponse } = require('./utils/response');
 const workflowState = require('./utils/workflowState');
+const { PendingStore } = require('./utils/workflowState');
+const {
+  WALLET_ADDRESS_REGEX,
+  TX_HASH_REGEX,
+  LIQUIDITY_VALUE_REGEX,
+  HTML_TAG_REGEX,
+  MAX_DESCRIPTION_LENGTH,
+  MAX_PROJECT_NAME_LENGTH
+} = require('./constants');
 const {
   parsePremiumInput,
   validatePremiumFields,
@@ -34,6 +43,10 @@ const {
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Trust the first proxy (nginx, cloudflare, etc.) so req.ip reflects the real client IP.
+// This is required for accurate rate-limiting behind a reverse proxy.
+app.set('trust proxy', 1);
 
 app.use(helmet());
 
@@ -80,9 +93,6 @@ const adminPremiumRateLimit = rateLimit({
   message: { success: false, message: 'Rate limit exceeded. Max 20 updates per hour per admin token.' }
 });
 
-// Validation patterns for premiumForensics fields
-const LIQUIDITY_VALUE_REGEX = /^\d+(\.\d+)?\s*(SOL|USDC|USD)?$/i;
-const HTML_TAG_REGEX = /<[^>]*>/;
 
 /**
  * ==========================
@@ -115,19 +125,19 @@ const chatId = process.env.TELEGRAM_CHAT_ID;
 const telegramAdminAuth = requireAdminAuth('telegram');
 
 // Tracks which wallet an admin is currently entering premium data for (chatId → pending entry)
-const pendingPremiumEntry = new Map();
+const pendingPremiumEntry = new PendingStore(5 * 60 * 1000);
 // Stores parsed premium data awaiting admin confirmation (confirmKey → confirmation info)
-const pendingPremiumData = new Map();
+const pendingPremiumData = new PendingStore(5 * 60 * 1000);
 
 // ── /edit_premium state ────────────────────────────────────────────────────
-// Tracks an active field-edit prompt: chatId → { walletId, walletAddress, caseNumber, fieldName, oldValue, timeoutId }
-const pendingFieldEdit = new Map();
+// Tracks an active field-edit prompt: chatId → { walletId, walletAddress, caseNumber, fieldName, oldValue }
+const pendingFieldEdit = new PendingStore(10 * 60 * 1000);
 // Stores single-field diff awaiting confirmation: confirmKey → { walletId, walletAddress, caseNumber, fieldName, oldValue, newValue }
-const pendingEditConfirm = new Map();
+const pendingEditConfirm = new PendingStore(5 * 60 * 1000);
 // Stores bulk-field diff awaiting confirmation: confirmKey → { walletId, walletAddress, caseNumber, currentData, parsed }
-const pendingBulkEdit = new Map();
+const pendingBulkEdit = new PendingStore(5 * 60 * 1000);
 // Stores delete confirmations awaiting admin approval: confirmKey → { walletId, walletAddress, caseNumber, premiumSnapshot }
-const pendingDelete = new Map();
+const pendingDelete = new PendingStore(5 * 60 * 1000);
 
 // Per-admin edit rate limiter: chatId → { count, windowStart }
 const adminEditRateLimiter = new Map();
@@ -375,11 +385,8 @@ bot.on('message', async (msg) => {
     caseNumber:    pending.caseNumber,
     parsed
   });
-  // Auto-expire confirmation after 5 minutes
-  setTimeout(() => pendingPremiumData.delete(confirmKey), 5 * 60 * 1000);
 
-  // Clear the pending entry (and its auto-expiry timer) — admin is now in the confirmation step
-  clearTimeout(pending.timeoutId);
+  // Clear the pending entry — admin is now in the confirmation step
   pendingPremiumEntry.delete(String(msg.chat.id));
 
   const preview = buildPremiumPreview(pending.caseNumber, pending.walletAddress, parsed);
@@ -398,7 +405,6 @@ bot.onText(/\/canceledit/, async (msg) => {
   if (String(msg.chat.id) !== String(chatId)) return;
   const pending = pendingFieldEdit.get(String(msg.chat.id));
   if (pending) {
-    clearTimeout(pending.timeoutId);
     pendingFieldEdit.delete(String(msg.chat.id));
     await bot.sendMessage(chatId, '❌ Field edit cancelled.');
   } else {
@@ -514,9 +520,6 @@ bot.onText(/\/delete_premium(?:\s+(.+))?/, async (msg, match) => {
     caseNumber:       wallet.caseNumber,
     premiumSnapshot:  currentData
   });
-  // Auto-expire after 5 minutes
-  setTimeout(() => pendingDelete.delete(confirmKey), 5 * 60 * 1000);
-
   const preview = buildDeletePreview(wallet.caseNumber, wallet.walletAddress, currentData);
   await bot.sendMessage(chatId, preview, {
     reply_markup: {
@@ -562,7 +565,6 @@ async function showWorkflowConfirmation(adminChatId, state) {
     caseNumber,
     parsed: collectedData
   });
-  setTimeout(() => pendingPremiumData.delete(confirmKey), 5 * 60 * 1000);
 
   const preview = buildPremiumPreview(caseNumber, walletAddress, collectedData);
   await bot.sendMessage(chatId, preview, {
@@ -664,8 +666,7 @@ bot.on('message', async (msg) => {
   const pending = pendingFieldEdit.get(String(msg.chat.id));
   if (!pending) return;
 
-  const { fieldName, oldValue, walletId, walletAddress, caseNumber, timeoutId } = pending;
-  clearTimeout(timeoutId);
+  const { fieldName, oldValue, walletId, walletAddress, caseNumber } = pending;
   pendingFieldEdit.delete(String(msg.chat.id));
 
   const fieldLabel = CAMEL_TO_KEY[fieldName] || fieldName;
@@ -698,7 +699,6 @@ bot.on('message', async (msg) => {
     oldValue,
     newValue
   });
-  setTimeout(() => pendingEditConfirm.delete(confirmKey), 5 * 60 * 1000);
 
   const preview = buildDiffPreview(caseNumber, fieldLabel, oldValue, newValue, isSensitive);
   await bot.sendMessage(chatId, preview, {
@@ -790,7 +790,6 @@ bot.on('message', async (msg) => {
     currentData,
     parsed
   });
-  setTimeout(() => pendingBulkEdit.delete(confirmKey), 5 * 60 * 1000);
 
   await bot.sendMessage(chatId, preview, {
     reply_markup: {
@@ -972,17 +971,12 @@ async function handlePremiumEdit(query, parts) {
     return Array.isArray(val) ? val.join(', ') : String(val);
   };
 
-  const timeoutId = setTimeout(
-    () => pendingFieldEdit.delete(String(query.message.chat.id)),
-    10 * 60 * 1000
-  );
   pendingFieldEdit.set(String(query.message.chat.id), {
     walletId:      wallet._id,
     walletAddress: wallet.walletAddress,
     caseNumber:    wallet.caseNumber,
     fieldName,
-    oldValue,
-    timeoutId
+    oldValue
   });
 
   await bot.answerCallbackQuery(query.id, { text: `Editing ${fieldLabel}…` });
@@ -1375,12 +1369,14 @@ app.get('/api/health', (_req, res) => {
 app.get('/api/wallets', async (req, res) => {
   try {
     const limitParam = parseInt(req.query.limit, 10);
-    const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 1000 ? limitParam : 0;
-    let query = Wallet.find({ status: 'verified' })
-      .select('-forensic -premiumForensics -__v');
-    if (limit > 0) query = query.limit(limit);
-    const wallets = await query;
-    res.json({ success: true, data: wallets.map(w => formatWalletResponse(w)) });
+    const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 1000 ? limitParam : 50;
+    const offsetParam = parseInt(req.query.offset, 10);
+    const offset = Number.isFinite(offsetParam) && offsetParam >= 0 ? offsetParam : 0;
+    const wallets = await Wallet.find({ status: 'verified' })
+      .select('-forensic -premiumForensics -__v')
+      .skip(offset)
+      .limit(limit);
+    res.json({ success: true, data: wallets.map(w => formatWalletResponse(w)), pagination: { limit, offset } });
   } catch (err) {
     console.error('GET /api/wallets error:', err.message);
     res.status(500).json({ success: false, message: 'Internal server error' });
@@ -1443,8 +1439,6 @@ app.post('/api/wallets/:address/premium/access', verifyX402Payment(0.11), async 
 });
 
 // SUBMIT REPORT
-const WALLET_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-const TX_HASH_REGEX = /^[1-9A-HJ-NP-Za-km-z]{1,100}$/;
 
 app.post('/api/wallets', submitRateLimit, async (req, res) => {
   try {
@@ -1463,14 +1457,14 @@ app.post('/api/wallets', submitRateLimit, async (req, res) => {
 
     // Validate description
     const description = typeof evidence?.description === 'string' ? evidence.description.trim() : '';
-    if (description.length > 500) {
-      return res.status(400).json({ success: false, message: 'Description must be 500 characters or fewer.' });
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      return res.status(400).json({ success: false, message: `Description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer.` });
     }
 
     // Validate projectName
     const projectName = typeof req.body.projectName === 'string' ? req.body.projectName.trim() : '';
-    if (projectName.length > 100) {
-      return res.status(400).json({ success: false, message: 'Project name must be 100 characters or fewer.' });
+    if (projectName.length > MAX_PROJECT_NAME_LENGTH) {
+      return res.status(400).json({ success: false, message: `Project name must be ${MAX_PROJECT_NAME_LENGTH} characters or fewer.` });
     }
 
     // Validate txHash (base58, max 100 chars)
@@ -1567,6 +1561,44 @@ app.post('/api/admin/wallets/:address/premium-forensics', async (req, res) => {
       forensicNotes,
       crossProjectLinks
     } = req.body;
+
+    // Validate fields using the same rules as PATCH /api/admin/wallets/:address/premium
+    const errors = [];
+
+    if (addLiquidityValue !== undefined) {
+      if (typeof addLiquidityValue !== 'string' || !LIQUIDITY_VALUE_REGEX.test(addLiquidityValue)) {
+        errors.push('addLiquidityValue must match /^\\d+(\\.\\d+)?\\s*(SOL|USDC|USD)?$/i');
+      }
+    }
+    if (removeLiquidityValue !== undefined) {
+      if (typeof removeLiquidityValue !== 'string' || !LIQUIDITY_VALUE_REGEX.test(removeLiquidityValue)) {
+        errors.push('removeLiquidityValue must match /^\\d+(\\.\\d+)?\\s*(SOL|USDC|USD)?$/i');
+      }
+    }
+    if (walletFunding !== undefined) {
+      if (typeof walletFunding !== 'string' || walletFunding.length > 200 || HTML_TAG_REGEX.test(walletFunding)) {
+        errors.push('walletFunding must be a string, max 200 chars, with no HTML tags');
+      }
+    }
+    if (tokensCreated !== undefined) {
+      if (!Array.isArray(tokensCreated) || !tokensCreated.every(addr => typeof addr === 'string' && WALLET_ADDRESS_REGEX.test(addr))) {
+        errors.push('tokensCreated must be an array of valid Solana Base58 addresses (32–44 chars)');
+      }
+    }
+    if (forensicNotes !== undefined) {
+      if (typeof forensicNotes !== 'string' || HTML_TAG_REGEX.test(forensicNotes)) {
+        errors.push('forensicNotes must be a string with no HTML tags');
+      }
+    }
+    if (crossProjectLinks !== undefined) {
+      if (!Array.isArray(crossProjectLinks) || !crossProjectLinks.every(addr => typeof addr === 'string' && WALLET_ADDRESS_REGEX.test(addr))) {
+        errors.push('crossProjectLinks must be an array of valid Solana Base58 addresses (32–44 chars)');
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({ success: false, message: 'Validation failed', errors });
+    }
 
     const update = { updatedAt: new Date() };
     if (addLiquidityValue !== undefined) update.addLiquidityValue = String(addLiquidityValue);
